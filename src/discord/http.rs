@@ -26,7 +26,7 @@ use super::transport::{CookieJar, http_client};
 use super::types::{
     Channel, DiscordError, Id, Message, MuteTarget, OutgoingMessage, SearchPage, SearchQuery, SearchScope, UserRef,
 };
-use crate::domain::live::LiveState;
+use crate::domain::live::{ConnState, LiveState};
 use crate::secrets::SecretStore;
 
 pub const API_BASE: &str = "https://discord.com/api/v9";
@@ -131,8 +131,14 @@ impl HttpDiscord {
         HttpDiscord { base, token, fp, client, live, halt: Mutex::new(None), pacer: Pacer::new() }
     }
 
-    fn halted(&self) -> Option<DiscordError> {
-        self.halt.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    /// Why no call may reach Discord now: this client's own halt, or one
+    /// the gateway or another client reported to `LiveState`.
+    fn stopped(&self) -> Option<DiscordError> {
+        let own = self.halt.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        own.or_else(|| match self.live.connection() {
+            ConnState::Halted(e) => Some(e),
+            _ => None,
+        })
     }
 
     /// Records a halting error here and in `LiveState`. The first halt wins.
@@ -181,11 +187,15 @@ impl HttpDiscord {
     }
 
     async fn call(&self, req: Req) -> DResult<Answer> {
-        if let Some(e) = self.halted() {
+        if let Some(e) = self.stopped() {
             return Err(e);
         }
         let mut turn =
             self.pacer.turn(req.method.is_write()).await.map_err(|s| DiscordError::RateLimited { retry_after_s: s })?;
+        // Calls queue behind the one in flight; if that one halted, they stop here.
+        if let Some(e) = self.stopped() {
+            return Err(e);
+        }
         let url = self.url(&req)?;
         let mut retried = false;
         loop {
@@ -284,6 +294,9 @@ fn classify(raw: Raw) -> Outcome {
     }
     match raw.status {
         400 if body.get("captcha_key").is_some() => Outcome::Err(DiscordError::Captcha),
+        // 60003: the action needs MFA, a security challenge, not a dead token
+        // (https://docs.discord.food/topics/opcodes-and-status-codes#json-error-codes).
+        401 if code == Some(60003) => Outcome::Err(DiscordError::Locked),
         401 => Outcome::Err(DiscordError::NeedsLogin),
         403 | 429 if !is_json => Outcome::Err(blocked),
         403 => Outcome::Err(DiscordError::Forbidden),

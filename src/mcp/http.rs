@@ -13,6 +13,8 @@ use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, Stream
 
 use super::server::TritoneServer;
 use super::state::AppState;
+use crate::discord::types::DiscordError;
+use crate::domain::live::ConnState;
 use crate::secrets::ACCOUNT_TOKEN;
 
 #[derive(Clone)]
@@ -59,24 +61,41 @@ pub fn app(server: TritoneServer, port: u16, token: String) -> Router {
 }
 
 /// `tritone login` calls this after saving a token, so the new login takes
-/// effect even if nobody polls `status`. Same rule as `status`: only a token
-/// Discord hasn't rejected (nor been tried since the halt) wakes the gateway,
-/// so repeating the call can't drive an identify loop.
-async fn login_notify(State(state): State<AppState>) -> (StatusCode, &'static str) {
+/// effect even if nobody polls `status`. Same rule as `status`: only while
+/// halted on `NeedsLogin`, and only for a token Discord hasn't rejected (nor
+/// been tried since the halt), so it can't lift a CAPTCHA or block halt, wake
+/// a healthy connection, or drive an identify loop.
+async fn login_notify(State(state): State<AppState>) -> (StatusCode, String) {
+    match state.live.connection() {
+        ConnState::Halted(DiscordError::NeedsLogin) => {}
+        ConnState::Halted(e) => {
+            let text = format!(
+                "tritone is stopped for another reason ({e}). Restart it (`pm2 restart tritone`) once that's sorted; it will use the new login"
+            );
+            return (StatusCode::CONFLICT, text);
+        }
+        _ => {
+            let text = "tritone is connected with the previous login: restart it (`pm2 restart tritone`) to switch";
+            return (StatusCode::CONFLICT, text.to_string());
+        }
+    }
     match state.secrets.get(ACCOUNT_TOKEN).await {
         Ok(Some(token)) if state.live.try_login_with(&token) => {
+            // The old client holds the dead token: drop it so nothing calls
+            // Discord with it before the gateway builds the new one.
+            state.set_api(None);
             state.login_notify.notify_one();
             tracing::info!("new login; reconnecting");
-            (StatusCode::OK, "tritone is reconnecting with the new login")
+            (StatusCode::OK, "tritone is reconnecting with the new login".into())
         }
         Ok(Some(_)) => (
             StatusCode::CONFLICT,
-            "tritone already tried this login (or Discord rejected it): run `tritone login` again",
+            "tritone already tried this login (or Discord rejected it): run `tritone login` again".into(),
         ),
-        Ok(None) => (StatusCode::CONFLICT, "there's no Discord login in the keyring: run `tritone login`"),
+        Ok(None) => (StatusCode::CONFLICT, "there's no Discord login in the keyring: run `tritone login`".into()),
         Err(e) => {
             tracing::warn!("reading the keyring failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "tritone could not read the keyring")
+            (StatusCode::INTERNAL_SERVER_ERROR, "tritone could not read the keyring".into())
         }
     }
 }

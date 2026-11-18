@@ -108,6 +108,40 @@ mod login_notify {
     }
 
     #[tokio::test]
+    async fn a_login_does_not_lift_another_halt() {
+        let s = state();
+        s.live.halt(DiscordError::Captcha);
+        s.secrets.set(ACCOUNT_TOKEN, "fake-token-new").await.unwrap();
+        let (status, text) = post(&s, "Bearer secret").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+        assert!(text.contains("restart"), "{text}");
+        assert_eq!(s.live.connection(), ConnState::Halted(DiscordError::Captcha));
+        assert!(!notified(&s).await);
+    }
+
+    #[tokio::test]
+    async fn a_login_while_connected_does_not_reconnect() {
+        let s = state();
+        s.secrets.set(ACCOUNT_TOKEN, "fake-token-new").await.unwrap();
+        let before = s.live.connection();
+        let (status, text) = post(&s, "Bearer secret").await;
+        assert_eq!(status, StatusCode::CONFLICT, "{text}");
+        assert_eq!(s.live.connection(), before);
+        assert!(!notified(&s).await);
+    }
+
+    #[tokio::test]
+    async fn an_accepted_login_drops_the_old_client() {
+        let s = state();
+        s.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
+        s.live.reject_token("fake-token-old");
+        s.secrets.set(ACCOUNT_TOKEN, "fake-token-new").await.unwrap();
+        assert_eq!(post(&s, "Bearer secret").await.0, StatusCode::OK);
+        // Until the gateway builds the new client, nothing can call Discord with the dead token.
+        assert!(s.api.read().unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn it_sits_behind_the_guard() {
         let s = state();
         s.secrets.set(ACCOUNT_TOKEN, "fake-token-new").await.unwrap();

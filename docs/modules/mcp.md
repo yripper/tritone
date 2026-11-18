@@ -18,7 +18,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - The other groups are empty so far.
 
 ## Other routes
-- `POST /login-notify` (`src/mcp/http.rs:65`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: a keyring token that `try_login_with` accepts → `notify_one` on `login_notify`, 200; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
+- `POST /login-notify` (`src/mcp/http.rs:68`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: only while halted on `NeedsLogin` (any other halt, or a live connection → 409 asking for a restart, so a login can't lift a CAPTCHA or block halt or wake a healthy gateway); then a keyring token that `try_login_with` accepts → `set_api(None)` (the old client holds the dead token) and `notify_one` on `login_notify`, 200; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
 
 ## Key methods
 - `TritoneServer::tool_router` (`src/mcp/server.rs:38`): `status_router + read_router + triage_router + write_router + engage_router + activity_router`. Built once in `new` and kept in the struct.
@@ -40,4 +40,4 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - Halt contract (`src/mcp/state.rs:7`): a dead token calls `live.reject_token(token)`, any other halting error `live.halt(e)`; `ctx()` refuses while halted, across gateway reconnects.
 
 ## Testing
-`cargo test mcp`: `/login-notify` (wakes on a new token, not on the rejected one or none, guarded); the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.
+`cargo test mcp`: `/login-notify` (wakes on a new token only while halted on `NeedsLogin`; not on the rejected one, none, another halt, or a live connection; drops the old client; guarded); the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.

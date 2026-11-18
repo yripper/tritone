@@ -67,3 +67,28 @@ fn full_watch_channels_follow_overrides() {
     // 101 and its thread via the guild, 102 overridden down, 202 on its own.
     assert_eq!(got, vec![Id(101), Id(103), Id(202)]);
 }
+
+#[test]
+fn subscribe_channels_are_few_text_channels_newest_first() {
+    use crate::discord::types::ChannelKind;
+    let mut channels: Vec<_> = (0..40).map(|i| with_last(text_channel(100 + i, 1), T - 100_000 + i as i64)).collect();
+    for (id, kind) in [(200, ChannelKind::Category), (201, ChannelKind::Voice), (202, ChannelKind::PublicThread)] {
+        let mut c = with_last(text_channel(id, 1), T);
+        c.kind = kind;
+        channels.push(c);
+    }
+    let mut forum = with_last(text_channel(203, 1), T - 1);
+    forum.kind = ChannelKind::Forum;
+    channels.push(forum);
+    channels.push(with_last(text_channel(300, 2), T)); // another guild
+    let watched: HashSet<Id> = channels.iter().map(|c| c.id).collect();
+
+    let got = subscribe_channels(&channels, Id(1), &watched);
+    assert_eq!(got.len(), MAX_SUBSCRIBED_CHANNELS);
+    assert_eq!(got[0], Id(203), "the most recently active first; forums count");
+    assert!(got[1..].iter().all(|c| (100..140).contains(&c.0)));
+    assert!(got.windows(2).skip(1).all(|w| w[0] > w[1]));
+    // Far under the gateway's 15 KiB payload limit even with large ids.
+    let big: Vec<Id> = (0..MAX_SUBSCRIBED_CHANNELS as u64).map(|i| Id(u64::MAX - i)).collect();
+    assert!(subscription_packet(Id(u64::MAX), &big).to_string().len() < 2_048);
+}

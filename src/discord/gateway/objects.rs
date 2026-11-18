@@ -105,12 +105,15 @@ pub(crate) fn guild_channels(v: &Value, guild: Id) -> Vec<Channel> {
         .collect()
 }
 
-/// The user's roles from a guild's member list entries (`merged_members`, or
-/// GUILD_CREATE `members`): the entry for `me`, else the only one there.
-pub(crate) fn my_roles_in(members: &[Value], me: Id) -> Vec<Id> {
-    let mine =
-        members.iter().find(|m| id_at(m, "user_id").or_else(|| m.get("user").and_then(|u| id_at(u, "id"))) == Some(me));
-    mine.or(if members.len() == 1 { members.first() } else { None }).map(|m| ids_at(m, "roles")).unwrap_or_default()
+/// The user's roles from a guild's member entries (`merged_members`, or
+/// GUILD_CREATE `members`), only from the entry that is `me`. Other entries
+/// are other people: READY_SUPPLEMENTAL's `merged_members` holds only those
+/// (https://docs.discord.food/gateway/gateway-events#ready, note 7).
+pub(crate) fn my_roles_in(members: &[Value], me: Id) -> Option<Vec<Id>> {
+    members
+        .iter()
+        .find(|m| id_at(m, "user_id").or_else(|| m.get("user").and_then(|u| id_at(u, "id"))) == Some(me))
+        .map(|m| ids_at(m, "roles"))
 }
 
 /// A mute is active when `muted` is set, until `mute_config.end_time` if any.

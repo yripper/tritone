@@ -171,3 +171,22 @@ fn parse_ready_tolerates_missing_sections() {
     assert_eq!(snap.me.id, Id(1));
     assert!(snap.guilds.is_empty() && snap.channels.is_empty() && snap.read_states.is_empty());
 }
+
+#[test]
+fn supplemental_members_of_others_never_become_my_roles() {
+    // With PRIORITIZED_READY_PAYLOAD, READY_SUPPLEMENTAL's merged_members are
+    // other users' members (https://docs.discord.food/gateway/gateway-events#ready, note 7).
+    let supp = json!({
+        "guilds": [{"id": "10"}, {"id": "20"}],
+        "merged_members": [[{"user_id": "2", "roles": ["12"]}], [{"user_id": "2", "roles": ["22"]}, {"user_id": "3", "roles": []}]]
+    });
+    assert!(supplemental_roles(&supp, Id(1)).is_empty());
+    let mut ready = ready_json(entries());
+    ready.as_object_mut().unwrap().remove("merged_members");
+    let snap = parse_ready(&ready, Some(&supp));
+    assert!(snap.guilds.iter().all(|g| g.my_roles.is_empty()));
+    // READY's own merged_members with a single other user's entry is not mine either.
+    let mut ready = ready_json(entries());
+    ready["merged_members"] = json!([[{"user_id": "2", "roles": ["11"]}], []]);
+    assert!(parse_ready(&ready, None).guilds.iter().all(|g| g.my_roles.is_empty()));
+}

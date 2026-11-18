@@ -132,3 +132,12 @@ fn sessions_replace_and_unknown_events_are_ignored() {
     // Malformed payloads give nothing rather than a half-built object.
     assert!(parse_dispatch("CHANNEL_UPDATE", &json!({"name": "no id"}), Some(ME)).is_empty());
 }
+
+#[test]
+fn guild_create_never_takes_another_members_roles() {
+    let d = json!({"id": "10", "name": "G010", "roles": [], "channels": [], "members": [{"user": {"id": "2"}, "roles": ["12"]}]});
+    match one("GUILD_CREATE", d) {
+        GatewayEvent::GuildUpsert(g, _) => assert!(g.my_roles.is_empty()),
+        other => panic!("unexpected {other:?}"),
+    }
+}

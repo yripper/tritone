@@ -62,10 +62,10 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 - `parse_ready(ready, supplemental)` (`src/discord/gateway/ready.rs:21`):
   - `read_state` comes versioned (`{entries,…}`) or bare. Only `read_state_type` 0 (or missing) is kept, and `last_message_id` 0 counts as nothing acked.
   - DMs: `recipient_ids` are resolved against `users` (and `relationships[].user`).
-  - `my_roles` come from `merged_members`, index-aligned with `guilds`, else from the supplemental's.
+  - `my_roles` come only from the user's own entry in `merged_members` (index-aligned with `guilds`), else from the supplemental's own entry. Other users' entries are never used: with PRIORITIZED_READY_PAYLOAD, READY_SUPPLEMENTAL's `merged_members` hold other people's members (https://docs.discord.food/gateway/gateway-events#ready, note 7).
   - `user_guild_settings` for guilds not in READY are dropped.
   - Guilds can be plain or carry `properties`.
-- `supplemental_roles` (`src/discord/gateway/ready.rs:102`): READY_SUPPLEMENTAL's `merged_members` → `MyRolesUpdate` per guild.
+- `supplemental_roles` (`src/discord/gateway/ready.rs:104`): `MyRolesUpdate` only for guilds whose READY_SUPPLEMENTAL list holds the user's own member (normally none: READY carries it).
 - `parse_dispatch(t, d, me)` (`src/discord/gateway/events.rs:61`) → `Vec<GatewayEvent>`:
   - MESSAGE_CREATE and MESSAGE_ACK;
   - CHANNEL_CREATE/UPDATE and THREAD_CREATE/UPDATE → `ChannelUpsert`; CHANNEL_DELETE and THREAD_DELETE → `ChannelDelete`;
@@ -77,9 +77,10 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
   - USER_GUILD_SETTINGS_UPDATE.
   
   Everything else (SESSIONS_REPLACE, PRESENCE_UPDATE, …) gives nothing, without a log line.
-- `missed_guilds(snapshot, seen, cutoff)` (`src/discord/gateway/subscribe.rs:25`): guilds with a channel whose READY `last_message_id` is past the highest id seen live yet older than the drop (`cutoff`). Messages from the downtime are expected gaps; DMs and channels with no baseline are skipped.
-- `subscription_packet(guild, channels)` (`src/discord/gateway/subscribe.rs:44`): op 37 `{typing, threads, activities: true, member_updates: false, members: [], channels: {id: [[0,99]]}, thread_member_lists: []}`.
-- `full_watch_channels` (`src/discord/gateway/subscribe.rs:62`): the channel's own level, else (for a thread) its parent's, else its guild's.
+- `missed_guilds(snapshot, seen, cutoff)` (`src/discord/gateway/subscribe.rs:29`): guilds with a channel whose READY `last_message_id` is past the highest id seen live yet older than the drop (`cutoff`). Messages from the downtime are expected gaps; DMs and channels with no baseline are skipped.
+- `subscription_packet(guild, channels)` (`src/discord/gateway/subscribe.rs:48`): op 37 `{typing, threads, activities: true, member_updates: false, members: [], channels: {id: [[0,99]]}, thread_member_lists: []}`.
+- `subscribe_channels(channels, guild, watched)` (`src/discord/gateway/subscribe.rs:67`): the channels in a guild's op 37. Only watched text, announcement, forum and media channels qualify, most recently active first, at most `MAX_SUBSCRIBED_CHANNELS` (5). That keeps the payload far under the 15 KiB limit (over it, Discord closes with 4002, a fatal code) and keeps the member-list ranges few.
+- `full_watch_channels` (`src/discord/gateway/subscribe.rs:81`): the channel's own level, else (for a thread) its parent's, else its guild's.
 
 ## Dependencies
 
@@ -97,6 +98,7 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 - **Halts on fatal close codes are `DiscordError::Api { status: 0, code: Some(close) }`** for now (no gateway-specific variant). Recovering from them means a restart.
 - **wreq's 30 s client timeout doesn't reach the upgraded socket:** it wraps the request and its body only. `socket_outlives_the_http_client_timeout` holds a socket for 3 paused minutes.
 - **The resume URL comes from READY,** but the token only goes to `*.discord.gg` over `wss` (or the host tritone was pointed at). Otherwise it resumes through the main gateway.
+- **Op 37's `channels: {id: [[0,99]]}` asks for the member-list rows of those channels** (the plan's shape). The spec says "never subscribe to member lists", so the coordinator decides whether to keep the ranges. Until then they are capped to 5 channels per missed guild.
 - **The miss check runs only on a fresh READY after a drop.** `cutoff` is the first drop since the last READY/RESUMED; RESUMED clears it, because a resume replays what was missed.
 - **Broadcast consumers can lag.** `LiveState::subscribe` is a tokio broadcast channel (capacity 1024). Anyone who subscribes must handle `RecvError::Lagged(n)` (count the skipped events and resync from `LiveState`), or it will drop events or stop on the error.
 - **`set_buffered` is set on every READY only.** A watch-level change made later has to call `live.set_buffered` itself.

@@ -11,9 +11,13 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::{Value, json};
 
-use crate::discord::types::{Channel, Id, ReadySnapshot};
+use crate::discord::types::{Channel, ChannelKind, Id, ReadySnapshot};
 use crate::store::WatchLevel;
 
+/// At most this many channels per guild in op 37. Each costs a member-list
+/// range, and a payload over 15 KiB closes the socket with 4002
+/// (https://docs.discord.food/gateway/using-gateway).
+pub(crate) const MAX_SUBSCRIBED_CHANNELS: usize = 5;
 /// Opcode 37, Guild Subscriptions Bulk.
 const OP_GUILD_SUBSCRIPTIONS_BULK: u8 = 37;
 
@@ -55,6 +59,21 @@ pub(crate) fn subscription_packet(guild: Id, channels: &[Id]) -> Value {
             "thread_member_lists": [],
         }}}
     })
+}
+
+/// Which of a guild's channels go in its op 37: watched channels that hold
+/// messages (text, announcement, forum, media; not categories, voice or
+/// threads), the most recently active first, at most `MAX_SUBSCRIBED_CHANNELS`.
+pub(crate) fn subscribe_channels(channels: &[Channel], guild: Id, watched: &HashSet<Id>) -> Vec<Id> {
+    let mut picked: Vec<&Channel> = channels
+        .iter()
+        .filter(|c| c.guild_id == Some(guild) && watched.contains(&c.id))
+        .filter(|c| {
+            matches!(c.kind, ChannelKind::Text | ChannelKind::Announcement | ChannelKind::Forum | ChannelKind::Media)
+        })
+        .collect();
+    picked.sort_by_key(|c| std::cmp::Reverse(c.last_message_id));
+    picked.into_iter().take(MAX_SUBSCRIBED_CHANNELS).map(|c| c.id).collect()
 }
 
 /// Channels whose effective watch level is full: the channel's own level,

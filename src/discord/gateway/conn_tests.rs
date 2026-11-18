@@ -513,7 +513,7 @@ async fn socket_outlives_the_http_client_timeout() {
 }
 
 #[tokio::test]
-async fn no_token_waits_for_login() {
+async fn no_token_at_start_halts_needs_login() {
     let h = harness(None).await;
     settle().await;
     assert_eq!(h.state.live.connection(), ConnState::Halted(DiscordError::NeedsLogin));
@@ -594,4 +594,20 @@ async fn thread_list_sync_and_roles_reach_the_model() {
     settle().await;
     assert_eq!(h.state.live.channel(Id(110)).unwrap().guild_id, Some(Id(10)));
     assert!(h.state.live.guild(Id(10)).unwrap().roles.iter().any(|r| r.id == Id(11)));
+}
+
+#[tokio::test]
+async fn ready_supplemental_keeps_my_roles() {
+    let h = harness(Some("tok-1")).await;
+    let mut p = h.server.accept().await;
+    let mut ready = ready_json(&h.server, json!([guild_json(10, 100, id_at(T - 60_000))]));
+    ready["merged_members"] = json!([[{"user_id": "1", "roles": ["11"]}]]);
+    p.handshake(ready).await;
+    p.dispatch(
+        "READY_SUPPLEMENTAL",
+        json!({"guilds": [{"id": "10"}], "merged_members": [[{"user_id": "2", "roles": ["12"]}]]}),
+    )
+    .await;
+    settle().await;
+    assert_eq!(h.state.live.guild(Id(10)).unwrap().my_roles, vec![Id(11)]);
 }

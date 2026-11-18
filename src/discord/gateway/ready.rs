@@ -42,10 +42,12 @@ pub(crate) fn parse_ready(ready: &Value, supplemental: Option<&Value>) -> ReadyS
     let mut channels = Vec::new();
     for (i, g) in array_at(ready, "guilds").iter().enumerate() {
         let Some(gid) = id_at(g, "id") else { continue };
-        let my_roles = match merged.get(i).and_then(Value::as_array) {
-            Some(members) => my_roles_in(members, me.id),
-            None => supp_roles.get(&gid).cloned().unwrap_or_default(),
-        };
+        let my_roles = merged
+            .get(i)
+            .and_then(Value::as_array)
+            .and_then(|members| my_roles_in(members, me.id))
+            .or_else(|| supp_roles.get(&gid).cloned())
+            .unwrap_or_default();
         let Some(guild) = parse_guild(g, my_roles) else { continue };
         channels.extend(guild_channels(g, gid));
         guilds.push(guild);
@@ -93,12 +95,12 @@ fn roles_by_guild(supp: &Value, me: Id) -> HashMap<Id, Vec<Id>> {
     array_at(supp, "guilds")
         .iter()
         .zip(merged)
-        .filter_map(|(g, m)| Some((id_at(g, "id")?, my_roles_in(m.as_array()?, me))))
+        .filter_map(|(g, m)| Some((id_at(g, "id")?, my_roles_in(m.as_array()?, me)?)))
         .collect()
 }
 
-/// The user's roles per guild from READY_SUPPLEMENTAL, for when READY came
-/// without `merged_members`.
+/// The user's roles per guild from READY_SUPPLEMENTAL, only where it carries
+/// the user's own member (normally READY does, and this is empty).
 pub(crate) fn supplemental_roles(supp: &Value, me: Id) -> Vec<GatewayEvent> {
     let mut by_guild: Vec<(Id, Vec<Id>)> = roles_by_guild(supp, me).into_iter().collect();
     by_guild.sort_by_key(|(g, _)| *g);

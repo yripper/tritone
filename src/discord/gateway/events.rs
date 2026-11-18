@@ -104,7 +104,7 @@ fn message_ack(d: &Value) -> Option<GatewayEvent> {
 
 fn guild_create(d: &Value, me: Option<Id>) -> Option<GatewayEvent> {
     let gid = id_at(d, "id")?;
-    let roles = me.map(|me| my_roles_in(array_at(d, "members"), me)).unwrap_or_default();
+    let roles = me.and_then(|me| my_roles_in(array_at(d, "members"), me)).unwrap_or_default();
     let g = parse_guild(d, roles)?;
     Some(GatewayEvent::GuildUpsert(Box::new(g), guild_channels(d, gid)))
 }

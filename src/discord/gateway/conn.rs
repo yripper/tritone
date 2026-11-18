@@ -8,7 +8,7 @@
 //! Never closes with 1000/1001: that ends the session and shows the user
 //! offline. Every close tritone sends is 4000, which keeps the session resumable.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use super::GatewayEvent;
 use super::events::parse_dispatch;
 use super::ready::{parse_ready, supplemental_roles};
-use super::subscribe::{full_watch_channels, missed_guilds, subscription_packet};
+use super::subscribe::{full_watch_channels, missed_guilds, subscribe_channels, subscription_packet};
 use super::zlib::Inflater;
 use crate::discord::DiscordApi;
 use crate::discord::fingerprint::Fingerprint;
@@ -414,17 +414,17 @@ impl Gateway {
 
     /// After a fresh READY that follows a reconnect: op 37 for the full-watch
     /// channels of guilds whose messages didn't arrive live.
-    fn subscriptions(&self, snap: &crate::discord::types::ReadySnapshot, gap: &Gap, watched: &[Id]) -> Vec<Value> {
+    fn subscriptions(
+        &self,
+        snap: &crate::discord::types::ReadySnapshot,
+        gap: &Gap,
+        watched: &HashSet<Id>,
+    ) -> Vec<Value> {
         let missed = missed_guilds(snap, &gap.seen, gap.cutoff);
         let packets: Vec<Value> = missed
             .into_iter()
             .filter_map(|g| {
-                let channels: Vec<Id> = snap
-                    .channels
-                    .iter()
-                    .filter(|c| c.guild_id == Some(g) && watched.contains(&c.id))
-                    .map(|c| c.id)
-                    .collect();
+                let channels = subscribe_channels(&snap.channels, g, watched);
                 (!channels.is_empty()).then(|| subscription_packet(g, &channels))
             })
             .collect();
@@ -620,8 +620,7 @@ impl Live<'_> {
             HashMap::new()
         });
         let buffered = full_watch_channels(&snap.channels, &watch);
-        let watched: Vec<Id> = buffered.iter().copied().collect();
-        let packets = self.gap.take().map(|g| self.gw.subscriptions(&snap, &g, &watched)).unwrap_or_default();
+        let packets = self.gap.take().map(|g| self.gw.subscriptions(&snap, &g, &buffered)).unwrap_or_default();
         tracing::info!(guilds = snap.guilds.len(), channels = snap.channels.len(), "gateway READY");
         self.gw.apply(GatewayEvent::Ready(Box::new(snap)));
         self.gw.state.live.set_buffered(buffered);

@@ -3,6 +3,12 @@
 //! The gateway task builds the REST client once it has a token and stores it
 //! in `api`. Tools reach Discord only through `ctx()`, which refuses while the
 //! connection is halted (e.g. the token went bad), so nothing retries in a loop.
+//!
+//! Halt contract (`LiveState`): a dead token (gateway close 4004, REST 401)
+//! calls `live.reject_token(token)`; any other halting error calls
+//! `live.halt(e)`. Gateway reconnects never lift a halt. `status` lifts a
+//! `NeedsLogin` halt only for a keyring token that differs from the rejected
+//! one, then wakes the gateway through `login_notify`.
 
 use std::sync::{Arc, RwLock};
 
@@ -27,7 +33,8 @@ pub struct AppState {
     pub queue: Arc<SendQueue>,
     pub config: Arc<Config>,
     pub timer: Arc<dyn Timer>,
-    /// Wakes a gateway halted with `NeedsLogin` after a new login.
+    /// Wakes a gateway halted with `NeedsLogin` after a new login. Notified
+    /// only after `LiveState::try_login_with` accepted the keyring's token.
     pub login_notify: Arc<Notify>,
 }
 

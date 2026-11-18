@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Mutex, MutexGuard};
 
+use sha2::{Digest, Sha256};
 use tokio::sync::broadcast;
 
 use crate::discord::gateway::GatewayEvent;
@@ -54,7 +55,13 @@ pub enum LiveEvent {
 }
 
 struct Inner {
+    /// The gateway's own state. `halt`, when set, overrides it.
     conn: ConnState,
+    /// Set by a halting error (gateway or REST). Only `clear_halt` or a new
+    /// login lifts it: reconnects, RESUMED and READY never do.
+    halt: Option<DiscordError>,
+    /// SHA-256 of the token last rejected or last tried after a halt.
+    login_token: Option<[u8; 32]>,
     me: Option<UserRef>,
     guilds: HashMap<Id, Guild>,
     channels: HashMap<Id, Channel>,
@@ -76,6 +83,8 @@ impl LiveState {
     pub fn new(policy: BufferPolicy) -> LiveState {
         let inner = Inner {
             conn: ConnState::Connecting,
+            halt: None,
+            login_token: None,
             me: None,
             guilds: HashMap::new(),
             channels: HashMap::new(),
@@ -145,6 +154,19 @@ impl LiveState {
                     inner.upsert_channel(c);
                 }
             }
+            GatewayEvent::GuildUpdate(g) => {
+                let mut inner = self.lock();
+                let mut g = *g;
+                if let Some(old) = inner.guilds.get(&g.id) {
+                    g.my_roles = old.my_roles.clone();
+                }
+                inner.guilds.insert(g.id, g);
+            }
+            GatewayEvent::MyRolesUpdate { guild, roles } => {
+                if let Some(g) = self.lock().guilds.get_mut(&guild) {
+                    g.my_roles = roles;
+                }
+            }
             GatewayEvent::GuildDelete(id) => {
                 let mut inner = self.lock();
                 inner.guilds.remove(&id);
@@ -158,7 +180,7 @@ impl LiveState {
                 self.lock().settings.insert(s.guild_id, s);
             }
             GatewayEvent::Disconnected => self.lock().conn = ConnState::Reconnecting,
-            GatewayEvent::Halted(e) => self.lock().conn = ConnState::Halted(e),
+            GatewayEvent::Halted(e) => self.halt(e),
         }
     }
 
@@ -168,8 +190,46 @@ impl LiveState {
         self.publish(LiveEvent::Acked { channel, message });
     }
 
+    /// Stops every Discord call (`AppState::ctx` refuses) until `clear_halt`
+    /// or a new login. For errors where `DiscordError::halts()` is true.
+    pub fn halt(&self, e: DiscordError) {
+        self.lock().halt = Some(e);
+    }
+
+    /// Lifts a halt. Only on an explicit user action (e.g. "I solved the
+    /// CAPTCHA, continue"), never automatically.
+    pub fn clear_halt(&self) {
+        self.lock().halt = None;
+    }
+
+    /// Discord rejected this token (gateway close 4004, REST 401): halt with
+    /// `NeedsLogin` and remember it, so it's never tried again.
+    pub fn reject_token(&self, token: &str) {
+        let mut inner = self.lock();
+        inner.login_token = Some(token_hash(token));
+        inner.halt = Some(DiscordError::NeedsLogin);
+    }
+
+    /// Called with the keyring's token while halted on `NeedsLogin`. A token
+    /// that was rejected, or already tried since the last halt, returns false
+    /// (the user must run `tritone login`). A new one lifts the halt, marks the
+    /// connection as connecting and returns true: wake the gateway.
+    pub fn try_login_with(&self, token: &str) -> bool {
+        let hash = token_hash(token);
+        let mut inner = self.lock();
+        if inner.login_token == Some(hash) {
+            return false;
+        }
+        inner.login_token = Some(hash);
+        inner.halt = None;
+        inner.conn = ConnState::Connecting;
+        true
+    }
+
+    /// The gateway's state, or `Halted` while a halt is set.
     pub fn connection(&self) -> ConnState {
-        self.lock().conn.clone()
+        let inner = self.lock();
+        inner.halt.clone().map_or_else(|| inner.conn.clone(), ConnState::Halted)
     }
 
     pub fn me(&self) -> Option<UserRef> {
@@ -216,15 +276,27 @@ impl LiveState {
         last.is_some() && last > acked
     }
 
-    /// Muted in Discord: the channel's own override, else its parent's, else
-    /// its guild's (DMs use the DM settings).
+    /// Muted in Discord, as the client counts it: the guild, the channel, its
+    /// category, or (for a thread) its parent channel and that one's category
+    /// has an active mute. A channel override never unmutes a muted guild.
+    /// DMs use the DM settings.
     pub fn discord_muted(&self, channel: Id, now_ms: i64) -> bool {
         let inner = self.lock();
         let Some(c) = inner.channels.get(&channel) else { return false };
         let Some(s) = inner.settings.get(&c.guild_id) else { return false };
-        let own = s.channel_mutes.get(&c.id);
-        let parent = c.parent_id.and_then(|p| s.channel_mutes.get(&p));
-        own.or(parent).copied().unwrap_or(s.muted).active(now_ms)
+        if s.muted.active(now_ms) {
+            return true;
+        }
+        // The channel, then up to two ancestors (thread → channel → category).
+        let mut next = Some(c.id);
+        for _ in 0..3 {
+            let Some(id) = next else { break };
+            if s.channel_mutes.get(&id).is_some_and(|m| m.active(now_ms)) {
+                return true;
+            }
+            next = inner.channels.get(&id).and_then(|c| c.parent_id);
+        }
+        false
     }
 
     /// Whether the user can see the channel, computed from roles and
@@ -310,11 +382,11 @@ impl Inner {
         self.me = Some(snap.me);
     }
 
-    /// Keeps the known `last_message_id` when the update has none.
+    /// Keeps the newest known `last_message_id`: an update may be older than
+    /// a MESSAGE_CREATE already seen.
     fn upsert_channel(&mut self, mut c: Channel) {
-        if c.last_message_id.is_none() {
-            c.last_message_id = self.channels.get(&c.id).and_then(|old| old.last_message_id);
-        }
+        let known = self.channels.get(&c.id).and_then(|old| old.last_message_id);
+        c.last_message_id = c.last_message_id.max(known);
         for u in &c.recipients {
             self.users.insert(u.id, u.clone());
         }
@@ -331,6 +403,7 @@ impl Inner {
     fn on_message(&mut self, msg: &Message, now_ms: i64, policy: BufferPolicy) -> bool {
         let me = self.me.as_ref().map(|u| u.id);
         let own = me == Some(msg.author.id);
+        let pinged = self.pings_me(msg, me);
         let ch = self.channels.entry(msg.channel_id).or_insert_with(|| new_channel_for(msg));
         ch.last_message_id = ch.last_message_id.max(Some(msg.id));
         let private = ch.kind.is_private();
@@ -338,7 +411,7 @@ impl Inner {
         if own {
             // Discord acks your own messages.
             *rs = ReadState { last_acked: Some(msg.id), mention_count: 0 };
-        } else if private || me.is_some_and(|m| msg.mentions.contains(&m)) {
+        } else if private || pinged {
             rs.mention_count += 1;
         }
         self.users.entry(msg.author.id).or_insert_with(|| msg.author.clone());
@@ -352,6 +425,27 @@ impl Inner {
         }
         own
     }
+}
+
+impl Inner {
+    /// Mentions the user directly, through one of their roles, or with
+    /// @everyone/@here, unless the server suppresses role or @everyone pings.
+    fn pings_me(&self, msg: &Message, me: Option<Id>) -> bool {
+        if me.is_some_and(|m| msg.mentions.contains(&m)) {
+            return true;
+        }
+        let gid = self.channels.get(&msg.channel_id).and_then(|c| c.guild_id).or(msg.guild_id);
+        let Some(gid) = gid else { return false };
+        let s = self.settings.get(&Some(gid));
+        let roles = !s.is_some_and(|s| s.suppress_roles)
+            && self.guilds.get(&gid).is_some_and(|g| msg.mention_roles.iter().any(|r| g.my_roles.contains(r)));
+        let everyone = msg.mention_everyone && !s.is_some_and(|s| s.suppress_everyone);
+        roles || everyone
+    }
+}
+
+fn token_hash(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
 }
 
 /// A channel first seen through a message (e.g. a new DM before CHANNEL_CREATE).

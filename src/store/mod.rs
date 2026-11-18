@@ -36,8 +36,8 @@ impl Store {
         Ok(Store { conn: Mutex::new(conn) })
     }
 
-    /// The connection, for the store's own modules. Lanes add their tables'
-    /// methods in new files under `src/store/`.
+    /// The connection, for the store's own modules. Each table's methods live
+    /// in their own file under `src/store/`.
     pub(crate) fn conn(&self) -> MutexGuard<'_, Connection> {
         // A panic while holding the lock leaves SQLite itself consistent, so
         // keep serving instead of poisoning every later call.

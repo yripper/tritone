@@ -14,7 +14,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - Tests: `src/mcp/mcp_tests.rs`, `src/mcp/http_tests.rs`.
 
 ## Tools
-- `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a token in the keyring wakes the gateway through `login_notify` (`src/mcp/tools/status.rs:43`).
+- `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `LiveState::try_login_with` accepts (not the rejected one, nor one already tried) wakes the gateway through `login_notify` and reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
 - The other groups are empty so far.
 
 ## Key methods
@@ -34,6 +34,7 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - `#[tool_handler(router = self.tool_router)]` evaluates the expression on every call, so the merged router is built once and stored.
 - Stateless mode answers `tools/call` without a prior `initialize`, which the HTTP test relies on.
 - `AppState.api` is a `std::sync::RwLock` (so `ctx()` is sync); never hold it across an await.
+- Halt contract (`src/mcp/state.rs:7`): a dead token calls `live.reject_token(token)`, any other halting error `live.halt(e)`; `ctx()` refuses while halted, across gateway reconnects.
 
 ## Testing
-`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, and the login wake-up); `run` refusing until the client is set and while halted; the instructions and style guide.
+`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.

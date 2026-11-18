@@ -129,10 +129,41 @@ async fn status_wakes_the_gateway_after_a_new_login() {
     state.live.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), 0);
     state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok").await.unwrap();
     let s = call_tool(state.clone(), "status").await;
-    assert_eq!(s["connection"], "needs_login");
+    assert_eq!(s["connection"], "connecting");
     assert!(s["note"].as_str().unwrap().contains("reconnecting"));
     // notify_one stores a permit, so this returns at once.
     tokio::time::timeout(std::time::Duration::from_secs(1), state.login_notify.notified()).await.unwrap();
+}
+
+#[tokio::test]
+async fn status_never_rewakes_the_gateway_with_a_rejected_token() {
+    let state = test_state();
+    state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok-dead").await.unwrap();
+    state.live.reject_token("tok-dead");
+    for _ in 0..3 {
+        let s = call_tool(state.clone(), "status").await;
+        assert_eq!(s["connection"], "needs_login");
+        let note = s["note"].as_str().unwrap();
+        assert!(note.contains("tritone login"), "{note}");
+        assert!(!note.contains("reconnecting"), "{note}");
+    }
+    let woke = tokio::time::timeout(std::time::Duration::from_millis(50), state.login_notify.notified()).await;
+    assert!(woke.is_err(), "no wake-up permit may be stored for a dead token");
+}
+
+#[tokio::test]
+async fn a_rest_halt_keeps_tools_blocked_across_gateway_resumes() {
+    use crate::discord::gateway::GatewayEvent;
+    use crate::discord::types::DiscordError;
+    let state = test_state();
+    state.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
+    state.live.halt(DiscordError::Captcha);
+    state.live.apply(GatewayEvent::Resumed, 10);
+    let server = TritoneServer::new(state.clone(), None);
+    let r = server.run(|_ctx| async { Ok(1) }).await;
+    assert_eq!(r.is_error, Some(true));
+    assert!(serde_json::to_string(&r.content).unwrap().contains("CAPTCHA"));
+    assert_eq!(call_tool(state, "status").await["connection"], "halted");
 }
 
 #[tokio::test]

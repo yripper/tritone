@@ -29,7 +29,7 @@ impl TritoneServer {
             ConnState::Connecting => ("connecting", None),
             ConnState::Ready { .. } => ("ready", None),
             ConnState::Reconnecting => ("reconnecting", Some("the connection dropped; resuming".to_string())),
-            ConnState::Halted(DiscordError::NeedsLogin) => ("needs_login", Some(self.needs_login_note().await)),
+            ConnState::Halted(DiscordError::NeedsLogin) => self.needs_login().await,
             ConnState::Halted(e) => ("halted", Some(e.to_string())),
         };
         let s = Status { connection, user: live.me().map(|u| u.username), guilds: live.guilds().len(), note };
@@ -38,16 +38,23 @@ impl TritoneServer {
 }
 
 impl TritoneServer {
-    /// While halted on `NeedsLogin`, a token in the keyring means the user
-    /// logged in again: wake the gateway instead of asking for a restart.
-    async fn needs_login_note(&self) -> String {
+    /// While halted on `NeedsLogin`, a token in the keyring that Discord hasn't
+    /// rejected (nor been tried with since the halt) means the user logged in
+    /// again: wake the gateway instead of asking for a restart. The dead token
+    /// never wakes it, so polling `status` can't drive an identify loop.
+    async fn needs_login(&self) -> (&'static str, Option<String>) {
         match self.state.secrets.get(ACCOUNT_TOKEN).await {
-            Ok(Some(_)) => {
+            Ok(Some(token)) if self.state.live.try_login_with(&token) => {
                 self.state.login_notify.notify_one();
-                "a login was found in the keyring; reconnecting. Call status again in a few seconds.".to_string()
+                let note = "a new login was found in the keyring; reconnecting. Call status again in a few seconds.";
+                ("connecting", Some(note.to_string()))
             }
-            Ok(None) => DiscordError::NeedsLogin.to_string(),
-            Err(e) => format!("could not read the keyring: {e}"),
+            Ok(Some(_)) => {
+                let note = format!("Discord rejected the saved login. {}", DiscordError::NeedsLogin);
+                ("needs_login", Some(note))
+            }
+            Ok(None) => ("needs_login", Some(DiscordError::NeedsLogin.to_string())),
+            Err(e) => ("needs_login", Some(format!("could not read the keyring: {e}"))),
         }
     }
 }

@@ -71,6 +71,55 @@ async fn cookie_jar_saves_at_most_every_5s() {
     assert!(!jar.is_dirty());
 }
 
+/// A keyring whose writes always fail, counting attempts.
+#[derive(Default)]
+struct FailingSecrets(std::sync::atomic::AtomicUsize);
+
+#[async_trait::async_trait]
+impl SecretStore for FailingSecrets {
+    async fn get(&self, _account: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+    async fn set(&self, _account: &str, _value: &str) -> anyhow::Result<()> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        anyhow::bail!("keyring write failed")
+    }
+    async fn delete(&self, _account: &str) -> anyhow::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn a_failed_save_backs_off_instead_of_retrying_every_second() {
+    let secrets = FailingSecrets::default();
+    let jar = CookieJar::empty();
+    set(&jar, "https://discord.com/", "a=1; Path=/; Max-Age=3600");
+    assert!(jar.save_if_dirty(&secrets, 10_000).await.is_err());
+    for t in [11_000, 20_000, 60_000] {
+        assert!(!jar.save_if_dirty(&secrets, t).await.unwrap(), "retried at {t}");
+    }
+    assert_eq!(secrets.0.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(jar.is_dirty(), "still owed a save");
+    assert!(jar.save_if_dirty(&secrets, 70_000).await.is_err(), "retries after a minute");
+}
+
+#[tokio::test]
+async fn a_full_jar_fits_one_keychain_line() {
+    use sha2::{Digest, Sha256};
+    let secrets = MemSecrets::default();
+    let jar = CookieJar::empty();
+    // 12 cookies with 128-char random-looking values: more than Discord sets.
+    for i in 0..12 {
+        let value = format!("{:x}{:x}", Sha256::digest([i, 1]), Sha256::digest([i, 2]));
+        set(&jar, "https://discord.com/", &format!("cookie_{i}={value}; Path=/; Max-Age=31536000; Secure; HttpOnly"));
+    }
+    assert!(jar.save_if_dirty(&secrets, 10_000).await.unwrap());
+    let stored = secrets.get(ACCOUNT_COOKIES).await.unwrap().unwrap();
+    assert!(stored.len() < 3_500, "{} chars", stored.len());
+    let again = CookieJar::load(&secrets).await.unwrap();
+    assert!(cookie_header(&again, "https://discord.com/").unwrap().contains("cookie_11="));
+}
+
 #[tokio::test]
 async fn corrupt_saved_jar_starts_empty() {
     let secrets = MemSecrets::default();

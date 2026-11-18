@@ -262,7 +262,7 @@ pub enum DiscordError {
     )]
     NeedsLogin,
     #[error(
-        "Discord asked for a CAPTCHA: open Discord in the official app, do any pending check there, then tell Claude to continue. tritone stopped and will not retry"
+        "Discord asked for a CAPTCHA: open Discord in the official app, do any pending check there, then restart tritone (`pm2 restart tritone`). tritone stopped and will not retry"
     )]
     Captcha,
     #[error(

@@ -21,7 +21,7 @@ Secrets in the OS keyring, through its CLI so no native crate is needed. Service
 tokio (process), async-trait, anyhow.
 
 ## Gotchas & invariants
-- `Keychain::set` writes through `security -i` on stdin, so values must be token characters (`assert_safe`, `src/secrets.rs:185`: letters, digits, `+ / = _ . : % -`). Anything else, like JSON, must be encoded first (e.g. base64).
+- `Keychain::set` writes through `security -i` on stdin, so values must be token characters (`assert_safe`, `src/secrets.rs:185`: letters, digits, `+ / = _ . : % -`). Anything else, like JSON, must be encoded first (e.g. base64). The whole `security -i` line must also fit in 4,000 bytes (`MAX_SECURITY_LINE`, `src/secrets.rs:80`): longer input would spill into a second command and store a truncated value, so `set` refuses it.
 - No plaintext fallback: an OS without a keyring CLI fails loudly.
 
 ## Testing

@@ -24,6 +24,8 @@ pub const BUILD_MAX_AGE_MS: i64 = 24 * 3_600_000;
 pub const KV_BUILD: &str = "build_number";
 pub const KV_INSTALLATION: &str = "installation_id";
 const SCRAPE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Chrome's `Accept` for a page navigation.
+const DOCUMENT_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7";
 
 /// Where the scrape and the installation id come from. Tests point it at a mock.
 #[derive(Debug, Clone)]
@@ -142,20 +144,29 @@ impl Fingerprint {
     /// id (the fallback build when none is cached). Nothing here is secret, so
     /// `_secrets` is unused today; it stays for callers that pass the keyring.
     pub fn load(store: &Store, _secrets: &dyn SecretStore) -> Result<Fingerprint> {
+        Ok(Fingerprint {
+            build_number: cached_build(store).map_or(FALLBACK_BUILD, |c| c.build),
+            installation_id: store.kv_get(KV_INSTALLATION)?,
+            ..Fingerprint::for_this_machine()
+        })
+    }
+
+    /// This machine's identity with the fallback build and no installation id.
+    pub fn for_this_machine() -> Fingerprint {
         let id = chrome_identity();
         let os_locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".into());
-        Ok(Fingerprint {
+        Fingerprint {
             user_agent: id.user_agent.into(),
             browser_version: id.browser_version.into(),
             os: id.os.into(),
             os_version: id.os_version.into(),
             locale: discord_locale(&os_locale).into(),
             timezone: iana_time_zone::get_timezone().unwrap_or_else(|_| "UTC".into()),
-            build_number: cached_build(store).map_or(FALLBACK_BUILD, |c| c.build),
-            installation_id: store.kv_get(KV_INSTALLATION)?,
+            build_number: FALLBACK_BUILD,
+            installation_id: None,
             sec_ch_ua: id.sec_ch_ua.into(),
             sec_ch_ua_platform: id.sec_ch_ua_platform.into(),
-        })
+        }
     }
 
     pub fn super_properties(&self) -> Value {
@@ -222,6 +233,42 @@ impl Fingerprint {
         h
     }
 
+    /// Chrome opening `https://discord.com/app` in a new tab.
+    fn document_headers(&self) -> Vec<(&'static str, String)> {
+        vec![
+            ("Sec-Ch-Ua", self.sec_ch_ua.clone()),
+            ("Sec-Ch-Ua-Mobile", "?0".into()),
+            ("Sec-Ch-Ua-Platform", self.sec_ch_ua_platform.clone()),
+            ("Upgrade-Insecure-Requests", "1".into()),
+            ("User-Agent", self.user_agent.clone()),
+            ("Accept", DOCUMENT_ACCEPT.into()),
+            ("Sec-Fetch-Site", "none".into()),
+            ("Sec-Fetch-Mode", "navigate".into()),
+            ("Sec-Fetch-User", "?1".into()),
+            ("Sec-Fetch-Dest", "document".into()),
+            ("Accept-Encoding", "gzip, deflate, br, zstd".into()),
+            ("Accept-Language", accept_language(&self.locale)),
+            ("Priority", "u=0, i".into()),
+        ]
+    }
+
+    /// The app page loading one of its scripts.
+    fn script_headers(&self, referer: String) -> Vec<(&'static str, String)> {
+        vec![
+            ("Sec-Ch-Ua-Platform", self.sec_ch_ua_platform.clone()),
+            ("User-Agent", self.user_agent.clone()),
+            ("Sec-Ch-Ua", self.sec_ch_ua.clone()),
+            ("Sec-Ch-Ua-Mobile", "?0".into()),
+            ("Accept", "*/*".into()),
+            ("Sec-Fetch-Site", "same-origin".into()),
+            ("Sec-Fetch-Mode", "no-cors".into()),
+            ("Sec-Fetch-Dest", "script".into()),
+            ("Referer", referer),
+            ("Accept-Encoding", "gzip, deflate, br, zstd".into()),
+            ("Accept-Language", accept_language(&self.locale)),
+        ]
+    }
+
     /// Headers for the gateway's WebSocket upgrade. Names keep their casing:
     /// Cloudflare answers 403 to a lowercase `Origin` on HTTP/1.1.
     pub fn ws_headers(&self) -> Vec<(&'static str, String)> {
@@ -244,7 +291,7 @@ impl Fingerprint {
     pub async fn refresh_with(&mut self, client: &wreq::Client, store: &Store, now_ms: i64, ends: &Endpoints) {
         let stale = cached_build(store).is_none_or(|c| now_ms - c.at > BUILD_MAX_AGE_MS);
         if stale {
-            if let Some(build) = refresh_build_number_from(client, &ends.web).await {
+            if let Some(build) = refresh_build_number_from(client, self, &ends.web).await {
                 self.build_number = build;
                 let cached = serde_json::to_string(&CachedBuild { build, at: now_ms }).unwrap_or_default();
                 if let Err(e) = store.kv_set(KV_BUILD, &cached) {
@@ -255,7 +302,7 @@ impl Fingerprint {
             }
         }
         if self.installation_id.is_none()
-            && let Some(id) = fetch_installation_id_from(client, &ends.api).await
+            && let Some(id) = fetch_installation_id_from(client, self, &ends.api).await
         {
             if let Err(e) = store.kv_set(KV_INSTALLATION, &id) {
                 tracing::warn!("saving the installation id failed: {e}");
@@ -282,8 +329,13 @@ pub fn parse_build_number(js: &str) -> Option<u64> {
     digits.parse().ok()
 }
 
-async fn get_text(client: &wreq::Client, url: &str) -> Option<String> {
-    let resp = client.get(url).timeout(SCRAPE_TIMEOUT).send().await.ok()?;
+/// A GET with the given browser headers (the client's emulation sends none).
+async fn get_text(client: &wreq::Client, url: &str, headers: Vec<(&'static str, String)>) -> Option<String> {
+    let mut req = client.get(url).timeout(SCRAPE_TIMEOUT);
+    for (name, value) in headers {
+        req = req.header(name, value);
+    }
+    let resp = req.send().await.ok()?;
     if !resp.status().is_success() {
         return None;
     }
@@ -291,25 +343,28 @@ async fn get_text(client: &wreq::Client, url: &str) -> Option<String> {
 }
 
 /// The live build number from discord.com: the web app's HTML names its
-/// sentry asset, which carries the build number. 5 s timeouts.
+/// sentry asset, which carries the build number. Sent with Chrome's page and
+/// script headers. 5 s timeouts.
 pub async fn refresh_build_number(client: &wreq::Client) -> Option<u64> {
-    refresh_build_number_from(client, &Endpoints::discord().web).await
+    refresh_build_number_from(client, &Fingerprint::for_this_machine(), &Endpoints::discord().web).await
 }
 
-pub async fn refresh_build_number_from(client: &wreq::Client, web_base: &str) -> Option<u64> {
-    let html = get_text(client, &format!("{web_base}/app")).await?;
+pub async fn refresh_build_number_from(client: &wreq::Client, fp: &Fingerprint, web_base: &str) -> Option<u64> {
+    let page = format!("{web_base}/app");
+    let html = get_text(client, &page, fp.document_headers()).await?;
     let asset = find_sentry_asset(&html)?.to_string();
-    parse_build_number(&get_text(client, &format!("{web_base}{asset}")).await?)
+    parse_build_number(&get_text(client, &format!("{web_base}{asset}"), fp.script_headers(page)).await?)
 }
 
 /// An installation id from the unauthenticated `GET /apex/experiments?surface=2`
 /// (https://docs.discord.food/topics/experiments).
 pub async fn fetch_installation_id(client: &wreq::Client) -> Option<String> {
-    fetch_installation_id_from(client, &Endpoints::discord().api).await
+    fetch_installation_id_from(client, &Fingerprint::for_this_machine(), &Endpoints::discord().api).await
 }
 
-pub async fn fetch_installation_id_from(client: &wreq::Client, api_base: &str) -> Option<String> {
-    let body = get_text(client, &format!("{api_base}/apex/experiments?surface=2")).await?;
+pub async fn fetch_installation_id_from(client: &wreq::Client, fp: &Fingerprint, api_base: &str) -> Option<String> {
+    let url = format!("{api_base}/apex/experiments?surface=2");
+    let body = get_text(client, &url, fp.rest_headers(false)).await?;
     let v: Value = serde_json::from_str(&body).ok()?;
     v.get("installation")?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
 }

@@ -14,6 +14,9 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
+use flate2::Compression;
+use flate2::read::DeflateDecoder;
+use flate2::write::DeflateEncoder;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::handshake::{client::generate_key, derive_accept_key};
 use tokio_tungstenite::tungstenite::protocol::{Role, WebSocketConfig};
@@ -32,6 +35,8 @@ pub const WS_MAX_SIZE: usize = 256 << 20;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// The jar is written to the keyring at most this often.
 const SAVE_EVERY_MS: i64 = 5_000;
+/// After a failed write, wait this long before trying again.
+const SAVE_RETRY_MS: i64 = 60_000;
 
 /// What the Chrome profile claims to be. These mirror wreq-util 0.2.1's
 /// Chrome149 profile (`src/emulate/profile/chrome.rs`, `v149`); a test checks
@@ -140,11 +145,13 @@ pub async fn ws_connect(client: &wreq::Client, url: &str, headers: &[(&str, Stri
 
 /// The persistent cookie jar, so tritone stays the same "device" across
 /// restarts. Keeps discord.com cookies only. Saved to the keyring (account
-/// `cookies`) as base64 of cookie_store's JSON, persistent cookies only.
+/// `cookies`) as base64 of deflated cookie_store JSON, persistent cookies
+/// only. Deflate keeps it well under the Keychain's ~4 KB line limit.
 pub struct CookieJar {
     store: Mutex<cookie_store::CookieStore>,
     dirty: AtomicBool,
-    last_save_ms: AtomicI64,
+    /// Earliest time of the next write: debounce after a save, back-off after a failure.
+    next_save_ms: AtomicI64,
 }
 
 fn is_discord(uri: &Uri) -> bool {
@@ -161,7 +168,7 @@ impl CookieJar {
     }
 
     fn from_store(store: cookie_store::CookieStore) -> CookieJar {
-        CookieJar { store: Mutex::new(store), dirty: AtomicBool::new(false), last_save_ms: AtomicI64::new(i64::MIN) }
+        CookieJar { store: Mutex::new(store), dirty: AtomicBool::new(false), next_save_ms: AtomicI64::new(i64::MIN) }
     }
 
     fn lock(&self) -> MutexGuard<'_, cookie_store::CookieStore> {
@@ -171,10 +178,9 @@ impl CookieJar {
     /// The saved jar, or an empty one when none is saved or it can't be read.
     pub async fn load(secrets: &dyn SecretStore) -> Result<CookieJar> {
         let Some(saved) = secrets.get(ACCOUNT_COOKIES).await? else { return Ok(CookieJar::empty()) };
-        let parsed = base64::engine::general_purpose::STANDARD
-            .decode(saved.trim())
-            .ok()
-            .and_then(|json| cookie_store::serde::json::load(&json[..]).ok());
+        let parsed = base64::engine::general_purpose::STANDARD.decode(saved.trim()).ok().and_then(|packed| {
+            cookie_store::serde::json::load(std::io::BufReader::new(DeflateDecoder::new(&packed[..]))).ok()
+        });
         match parsed {
             Some(store) => Ok(CookieJar::from_store(store)),
             None => {
@@ -189,25 +195,32 @@ impl CookieJar {
         self.dirty.load(Ordering::SeqCst)
     }
 
-    /// Writes the jar when it changed and the last save is at least 5 s old.
-    /// Returns whether it wrote.
+    /// Writes the jar when it changed and the last save is at least 5 s old
+    /// (a minute after a failed one). Returns whether it wrote.
     pub async fn save_if_dirty(&self, secrets: &dyn SecretStore, now_ms: i64) -> Result<bool> {
-        if !self.is_dirty() || now_ms.saturating_sub(self.last_save_ms.load(Ordering::SeqCst)) < SAVE_EVERY_MS {
+        if !self.is_dirty() || now_ms < self.next_save_ms.load(Ordering::SeqCst) {
             return Ok(false);
         }
         self.dirty.store(false, Ordering::SeqCst);
-        let mut json = Vec::new();
-        if let Err(e) = cookie_store::serde::json::save(&self.lock(), &mut json) {
-            self.dirty.store(true, Ordering::SeqCst);
-            bail!("serializing the cookie jar failed: {e}");
+        match self.write(secrets).await {
+            Ok(()) => {
+                self.next_save_ms.store(now_ms.saturating_add(SAVE_EVERY_MS), Ordering::SeqCst);
+                Ok(true)
+            }
+            Err(e) => {
+                self.dirty.store(true, Ordering::SeqCst);
+                self.next_save_ms.store(now_ms.saturating_add(SAVE_RETRY_MS), Ordering::SeqCst);
+                Err(e)
+            }
         }
-        let encoded = base64::engine::general_purpose::STANDARD.encode(json);
-        if let Err(e) = secrets.set(ACCOUNT_COOKIES, &encoded).await {
-            self.dirty.store(true, Ordering::SeqCst);
-            return Err(e);
-        }
-        self.last_save_ms.store(now_ms, Ordering::SeqCst);
-        Ok(true)
+    }
+
+    async fn write(&self, secrets: &dyn SecretStore) -> Result<()> {
+        let mut deflate = DeflateEncoder::new(Vec::new(), Compression::best());
+        cookie_store::serde::json::save(&self.lock(), &mut deflate)
+            .map_err(|e| anyhow::anyhow!("serializing the cookie jar failed: {e}"))?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(deflate.finish()?);
+        secrets.set(ACCOUNT_COOKIES, &encoded).await
     }
 
     /// Saves in the background, checking every second.

@@ -50,6 +50,18 @@ async fn set_rejects_unsafe_chars() {
 }
 
 #[tokio::test]
+async fn set_refuses_values_longer_than_a_security_line() {
+    // `security -i` reads at most ~4 KB per line: the rest would run as a
+    // separate command and leave a truncated value behind.
+    let r = FakeRunner::default();
+    let k = Keychain::new(&r);
+    let err = k.set(ACCOUNT_COOKIES, &"a".repeat(4_000)).await.unwrap_err();
+    assert!(err.to_string().contains("too long"), "{err}");
+    assert!(r.calls.lock().unwrap().is_empty());
+    k.set(ACCOUNT_COOKIES, &"a".repeat(3_500)).await.unwrap();
+}
+
+#[tokio::test]
 async fn set_accepts_percent_encoded_value() {
     let r = FakeRunner::default();
     Keychain::new(&r).set(ACCOUNT_COOKIES, "abc%2Fdef%3D").await.unwrap();

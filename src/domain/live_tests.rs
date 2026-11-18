@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::discord::gateway::GatewayEvent;
-use crate::discord::types::{Channel, Id, MuteUntil, Overwrite, Role};
+use crate::discord::types::{Channel, DiscordError, Id, MuteUntil, Overwrite, Role};
 use crate::test_support::*;
 
 const ME: u64 = 7;
@@ -125,14 +125,35 @@ fn message_ack_clears_unread() {
 }
 
 #[test]
-fn discord_mute_channel_overrides_guild() {
+fn discord_mute_on_the_guild_mutes_every_channel() {
+    // Discord ORs the guild, category and channel mutes: a channel override
+    // with `muted:false` (common, from notification settings) doesn't unmute it.
     let l = ready_live();
     let mut s = settings(Some(1), MuteUntil::Forever);
     s.channel_mutes.insert(Id(102), MuteUntil::No);
     l.apply(GatewayEvent::SettingsUpdate(s), NOW);
     assert!(l.discord_muted(Id(101), NOW));
-    assert!(!l.discord_muted(Id(102), NOW));
+    assert!(l.discord_muted(Id(102), NOW));
     assert!(!l.discord_muted(Id(201), NOW), "DMs have no settings here");
+}
+
+#[test]
+fn discord_mute_on_a_channel_or_category_mutes_it() {
+    let l = ready_live();
+    let mut cat = text_channel(301, 1);
+    cat.kind = crate::discord::types::ChannelKind::Category;
+    let mut under = text_channel(103, 1);
+    under.parent_id = Some(Id(301));
+    l.apply(GatewayEvent::ChannelUpsert(cat), NOW);
+    l.apply(GatewayEvent::ChannelUpsert(under), NOW);
+    let mut s = settings(Some(1), MuteUntil::No);
+    s.channel_mutes.insert(Id(102), MuteUntil::Forever);
+    s.channel_mutes.insert(Id(301), MuteUntil::Forever);
+    s.channel_mutes.insert(Id(103), MuteUntil::No);
+    l.apply(GatewayEvent::SettingsUpdate(s), NOW);
+    assert!(l.discord_muted(Id(102), NOW));
+    assert!(l.discord_muted(Id(103), NOW), "a muted category mutes its channels");
+    assert!(!l.discord_muted(Id(101), NOW));
 }
 
 #[test]
@@ -147,6 +168,25 @@ fn thread_follows_parent_mute_override() {
     l.apply(GatewayEvent::SettingsUpdate(s), NOW);
     assert!(l.discord_muted(Id(401), NOW));
     assert!(!l.discord_muted(Id(101), NOW));
+}
+
+#[test]
+fn thread_follows_its_parents_category_mute() {
+    let l = ready_live();
+    let mut cat = text_channel(301, 1);
+    cat.kind = crate::discord::types::ChannelKind::Category;
+    let mut parent = text_channel(103, 1);
+    parent.parent_id = Some(Id(301));
+    let mut thread = text_channel(401, 1);
+    thread.kind = crate::discord::types::ChannelKind::PublicThread;
+    thread.parent_id = Some(Id(103));
+    for c in [cat, parent, thread] {
+        l.apply(GatewayEvent::ChannelUpsert(c), NOW);
+    }
+    let mut s = settings(Some(1), MuteUntil::No);
+    s.channel_mutes.insert(Id(301), MuteUntil::Forever);
+    l.apply(GatewayEvent::SettingsUpdate(s), NOW);
+    assert!(l.discord_muted(Id(401), NOW));
 }
 
 #[test]
@@ -243,8 +283,120 @@ fn disconnect_and_halt_update_connection() {
     assert_eq!(l.connection(), ConnState::Reconnecting);
     l.apply(GatewayEvent::Resumed, NOW + 5);
     assert_eq!(l.connection(), ConnState::Ready { since_ms: NOW + 5 });
-    l.apply(GatewayEvent::Halted(crate::discord::types::DiscordError::NeedsLogin), NOW);
+    l.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), NOW);
     assert!(matches!(l.connection(), ConnState::Halted(_)));
+}
+
+#[test]
+fn a_halt_survives_gateway_reconnects_until_cleared() {
+    let l = ready_live();
+    l.halt(DiscordError::Captcha);
+    for ev in [GatewayEvent::Disconnected, GatewayEvent::Resumed] {
+        l.apply(ev, NOW + 10);
+        assert_eq!(l.connection(), ConnState::Halted(DiscordError::Captcha));
+    }
+    l.apply(GatewayEvent::Ready(Box::new(ready(ME, vec![guild(1)], vec![]))), NOW + 20);
+    assert_eq!(l.connection(), ConnState::Halted(DiscordError::Captcha), "routine reconnects never lift a halt");
+    l.clear_halt();
+    assert_eq!(l.connection(), ConnState::Ready { since_ms: NOW + 20 });
+}
+
+#[test]
+fn a_rejected_token_is_never_tried_again() {
+    let l = ready_live();
+    l.reject_token("tok-old");
+    assert_eq!(l.connection(), ConnState::Halted(DiscordError::NeedsLogin));
+    assert!(!l.try_login_with("tok-old"), "the same dead token must not wake the gateway");
+    assert_eq!(l.connection(), ConnState::Halted(DiscordError::NeedsLogin));
+    assert!(l.try_login_with("tok-new"));
+    assert_eq!(l.connection(), ConnState::Connecting, "a new login lifts the halt");
+}
+
+#[test]
+fn a_token_tried_once_while_halted_is_not_tried_twice() {
+    // Even if the gateway halts without naming the token, waking it with the
+    // same token twice would loop identifies.
+    let l = ready_live();
+    l.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), NOW);
+    assert!(l.try_login_with("tok-1"));
+    l.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), NOW);
+    assert!(!l.try_login_with("tok-1"));
+    assert!(l.try_login_with("tok-2"));
+}
+
+#[test]
+fn guild_update_keeps_channels_and_my_roles() {
+    let l = ready_live();
+    let mut g = guild(1);
+    g.my_roles = vec![Id(900)];
+    l.apply(GatewayEvent::GuildUpsert(Box::new(g), vec![text_channel(101, 1), text_channel(102, 1)]), NOW);
+    let id = id_at(NOW);
+    create(&l, msg(id, 101, 2, "x"));
+    let mut renamed = guild(1);
+    renamed.name = "G001-renamed".into();
+    renamed.my_roles = vec![];
+    l.apply(GatewayEvent::GuildUpdate(Box::new(renamed)), NOW);
+    let g = l.guild(Id(1)).unwrap();
+    assert_eq!(g.name, "G001-renamed");
+    assert_eq!(g.my_roles, vec![Id(900)], "GUILD_UPDATE carries no member roles");
+    assert!(l.channel(Id(102)).is_some(), "GUILD_UPDATE carries no channels");
+    assert!(l.is_unread(Id(101)));
+}
+
+#[test]
+fn my_roles_update_changes_visibility() {
+    let l = ready_live();
+    let mut g = guild(1);
+    g.roles.push(Role { id: Id(900), permissions: 0 });
+    l.apply(GatewayEvent::GuildUpdate(Box::new(g)), NOW);
+    let mut c = text_channel(101, 1);
+    c.overwrites = vec![
+        Overwrite { id: Id(1), is_member: false, allow: 0, deny: VIEW },
+        Overwrite { id: Id(900), is_member: false, allow: VIEW, deny: 0 },
+    ];
+    l.apply(GatewayEvent::ChannelUpsert(c), NOW);
+    assert!(!l.can_view(Id(101)));
+    l.apply(GatewayEvent::MyRolesUpdate { guild: Id(1), roles: vec![Id(900)] }, NOW);
+    assert!(l.can_view(Id(101)));
+    l.apply(GatewayEvent::MyRolesUpdate { guild: Id(99), roles: vec![] }, NOW);
+}
+
+#[test]
+fn role_and_everyone_mentions_count_unless_suppressed() {
+    let l = ready_live();
+    l.apply(GatewayEvent::MyRolesUpdate { guild: Id(1), roles: vec![Id(900)] }, NOW);
+    let mut role = msg(id_at(NOW - 3_000), 101, 2, "role ping");
+    role.mention_roles = vec![Id(900)];
+    let mut other_role = msg(id_at(NOW - 2_500), 101, 2, "other role");
+    other_role.mention_roles = vec![Id(901)];
+    let mut everyone = msg(id_at(NOW - 2_000), 101, 2, "everyone");
+    everyone.mention_everyone = true;
+    for m in [role.clone(), other_role, everyone.clone()] {
+        create(&l, m);
+    }
+    assert_eq!(l.read_state(Id(101)).mention_count, 2);
+
+    let mut s = settings(Some(1), MuteUntil::No);
+    s.suppress_roles = true;
+    s.suppress_everyone = true;
+    l.apply(GatewayEvent::SettingsUpdate(s), NOW);
+    role.channel_id = Id(102);
+    everyone.channel_id = Id(102);
+    create(&l, role);
+    create(&l, everyone);
+    assert_eq!(l.read_state(Id(102)).mention_count, 0, "suppressed in this server");
+}
+
+#[test]
+fn a_stale_channel_update_never_moves_last_message_back() {
+    let l = ready_live();
+    let new = id_at(NOW);
+    create(&l, msg(new, 101, 2, "x"));
+    let mut stale = text_channel(101, 1);
+    stale.last_message_id = Some(id_at(NOW - 60_000));
+    l.apply(GatewayEvent::ChannelUpsert(stale), NOW);
+    assert_eq!(l.channel(Id(101)).unwrap().last_message_id, Some(new));
+    assert!(l.is_unread(Id(101)));
 }
 
 #[test]

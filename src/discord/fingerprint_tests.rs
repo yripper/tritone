@@ -153,14 +153,37 @@ fn plain_client() -> wreq::Client {
 #[tokio::test]
 async fn build_number_parses_sentry_asset() {
     let server = sentry_server().await;
-    assert_eq!(refresh_build_number_from(&plain_client(), &server.uri()).await, Some(654321));
+    assert_eq!(refresh_build_number_from(&plain_client(), &fp(), &server.uri()).await, Some(654321));
+}
+
+fn got<'a>(req: &'a wiremock::Request, name: &str) -> Option<&'a str> {
+    req.headers.get(name).and_then(|v| v.to_str().ok())
+}
+
+#[tokio::test]
+async fn build_number_scrape_looks_like_chrome_opening_the_app() {
+    let server = sentry_server().await;
+    let f = fp();
+    refresh_build_number_from(&plain_client(), &f, &server.uri()).await.unwrap();
+    let reqs = server.received_requests().await.unwrap();
+    let page = reqs.iter().find(|r| r.url.path() == "/app").unwrap();
+    assert_eq!(got(page, "user-agent"), Some(f.user_agent.as_str()));
+    assert_eq!(got(page, "sec-ch-ua"), Some(f.sec_ch_ua.as_str()));
+    assert_eq!(got(page, "sec-fetch-mode"), Some("navigate"));
+    assert_eq!(got(page, "sec-fetch-dest"), Some("document"));
+    assert!(got(page, "accept").unwrap().starts_with("text/html"));
+    assert!(got(page, "accept-language").is_some());
+    let script = reqs.iter().find(|r| r.url.path().starts_with("/assets/sentry")).unwrap();
+    assert_eq!(got(script, "user-agent"), Some(f.user_agent.as_str()));
+    assert_eq!(got(script, "sec-fetch-dest"), Some("script"));
+    assert_eq!(got(script, "referer"), Some(format!("{}/app", server.uri()).as_str()));
 }
 
 #[tokio::test]
 async fn build_number_refresh_failure_is_none() {
     let server = MockServer::start().await;
     Mock::given(method("GET")).and(path("/app")).respond_with(ResponseTemplate::new(503)).mount(&server).await;
-    assert_eq!(refresh_build_number_from(&plain_client(), &server.uri()).await, None);
+    assert_eq!(refresh_build_number_from(&plain_client(), &fp(), &server.uri()).await, None);
 }
 
 #[tokio::test]
@@ -172,10 +195,14 @@ async fn installation_id_comes_from_apex_experiments() {
         .mount(&server)
         .await;
     let api = format!("{}/api/v9", server.uri());
-    assert_eq!(fetch_installation_id_from(&plain_client(), &api).await.as_deref(), Some("1.abc_def"));
+    let f = fp();
+    assert_eq!(fetch_installation_id_from(&plain_client(), &f, &api).await.as_deref(), Some("1.abc_def"));
     let req = &server.received_requests().await.unwrap()[0];
     assert_eq!(req.url.query(), Some("surface=2"));
     assert!(req.headers.get("authorization").is_none(), "unauthenticated");
+    assert_eq!(got(req, "user-agent"), Some(f.user_agent.as_str()));
+    assert!(got(req, "x-super-properties").is_some());
+    assert_eq!(got(req, "sec-fetch-mode"), Some("cors"));
 }
 
 #[tokio::test]

@@ -75,6 +75,10 @@ pub trait SecretStore: Send + Sync {
     async fn delete(&self, account: &str) -> Result<()>;
 }
 
+/// `security -i` reads at most 4095 bytes per line: anything longer spills into
+/// a second command and leaves a truncated value stored. Keep a margin.
+const MAX_SECURITY_LINE: usize = 4_000;
+
 pub struct Keychain<R: CommandRunner> {
     runner: R,
 }
@@ -100,6 +104,9 @@ impl<R: CommandRunner> SecretStore for Keychain<R> {
         assert_safe(account)?;
         assert_safe(value)?;
         let line = format!("add-generic-password -U -s {SERVICE} -a {account} -w {value}\n");
+        if line.len() > MAX_SECURITY_LINE {
+            bail!("value for {account} is too long for the Keychain ({} bytes)", value.len());
+        }
         let r = self.runner.run(&["-i"], Some(&line)).await?;
         if r.code != 0 {
             bail!("keychain write failed for {account} (exit {})", r.code);

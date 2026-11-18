@@ -6,6 +6,10 @@ pub mod api;
 pub mod fake;
 pub mod fingerprint;
 pub mod gateway;
+pub mod http;
+pub mod login;
+pub(crate) mod parse;
+pub mod rate;
 pub mod transport;
 pub mod types;
 

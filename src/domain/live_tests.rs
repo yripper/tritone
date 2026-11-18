@@ -349,6 +349,21 @@ fn a_rejected_token_is_never_tried_again() {
 }
 
 #[test]
+fn a_stale_token_cannot_reject_a_newer_login() {
+    // The old REST client (or a late 4004) answering 401 with the old token
+    // after a new login was accepted must not halt the new session.
+    let l = ready_live();
+    l.reject_token("tok-old");
+    assert!(l.try_login_with("tok-new"));
+    l.reject_token("tok-old");
+    assert_eq!(l.connection(), ConnState::Connecting);
+    assert!(!l.try_login_with("tok-new"), "the new login stays the one already tried");
+    // The current token can still be rejected.
+    l.reject_token("tok-new");
+    assert_eq!(l.connection(), ConnState::Halted(DiscordError::NeedsLogin));
+}
+
+#[test]
 fn a_token_tried_once_while_halted_is_not_tried_twice() {
     // Even if the gateway halts without naming the token, waking it with the
     // same token twice would loop identifies.
@@ -452,4 +467,28 @@ fn guild_and_channel_lifecycle() {
     create(&l, msg(id, 101, 2, "x"));
     l.apply(GatewayEvent::ChannelUpsert(text_channel(101, 1)), NOW);
     assert_eq!(l.channel(Id(101)).unwrap().last_message_id, Some(id));
+}
+
+#[test]
+fn role_events_change_visibility() {
+    let l = ready_live();
+    l.apply(GatewayEvent::MyRolesUpdate { guild: Id(1), roles: vec![Id(900)] }, NOW);
+    let mut c = text_channel(101, 1);
+    c.overwrites = vec![Overwrite { id: Id(1), is_member: false, allow: 0, deny: VIEW }];
+    l.apply(GatewayEvent::ChannelUpsert(c), NOW);
+    assert!(!l.can_view(Id(101)));
+    // A new role of mine with ADMINISTRATOR sees everything.
+    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 1 << 3 } }, NOW);
+    assert!(l.can_view(Id(101)));
+    // Updating it replaces it rather than adding a second copy.
+    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 0 } }, NOW);
+    assert!(!l.can_view(Id(101)));
+    assert_eq!(l.guild(Id(1)).unwrap().roles.iter().filter(|r| r.id == Id(900)).count(), 1);
+
+    l.apply(GatewayEvent::RoleDelete { guild: Id(1), role: Id(900) }, NOW);
+    let g = l.guild(Id(1)).unwrap();
+    assert!(g.roles.iter().all(|r| r.id != Id(900)));
+    assert!(g.my_roles.is_empty(), "a deleted role leaves my roles too");
+    // Unknown guilds are ignored.
+    l.apply(GatewayEvent::RoleDelete { guild: Id(99), role: Id(1) }, NOW);
 }

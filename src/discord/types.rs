@@ -258,7 +258,7 @@ pub struct ReadySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DiscordError {
     #[error(
-        "the Discord session is not valid (never logged in, or logged out elsewhere): ask the user to run `tritone login` in a terminal, then try again"
+        "the Discord session is not valid (never logged in, or logged out elsewhere): ask the user to run `tritone login` in a terminal"
     )]
     NeedsLogin,
     #[error(
@@ -285,6 +285,10 @@ pub enum DiscordError {
     Api { status: u16, code: Option<u32> },
     #[error("network error talking to Discord: {0}")]
     Http(String),
+    /// The gateway closed the session with a code that rules out reconnecting
+    /// (e.g. 4010–4016): every re-identify would add a session.
+    #[error("Discord closed the session (code {code}): restart tritone (pm2 restart tritone)")]
+    GatewayClosed { code: u16 },
 }
 
 impl DiscordError {
@@ -292,7 +296,11 @@ impl DiscordError {
     pub fn halts(&self) -> bool {
         matches!(
             self,
-            DiscordError::NeedsLogin | DiscordError::Captcha | DiscordError::Locked | DiscordError::Blocked { .. }
+            DiscordError::NeedsLogin
+                | DiscordError::Captcha
+                | DiscordError::Locked
+                | DiscordError::Blocked { .. }
+                | DiscordError::GatewayClosed { .. }
         )
     }
 
@@ -309,6 +317,7 @@ impl DiscordError {
             DiscordError::NotFound => "not_found",
             DiscordError::Api { .. } => "api",
             DiscordError::Http(_) => "http",
+            DiscordError::GatewayClosed { .. } => "gateway_closed",
         }
     }
 }

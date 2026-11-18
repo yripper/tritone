@@ -67,16 +67,23 @@ pub fn effective_watch(channel: &Channel, live: &LiveState, watch: &WatchMap, no
     watch_of(channel, live, watch, now_ms).0
 }
 
-/// The level, and whether it was set in tritone.
-fn watch_of(c: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> (WatchLevel, bool) {
+/// The level set in tritone that applies: the channel's own, else (for a
+/// thread) its parent's, else its server's. Needs no live model, so the
+/// gateway can use it before READY is applied.
+pub fn explicit_watch(c: &Channel, watch: &WatchMap) -> Option<WatchLevel> {
     let parent = c.parent_id.filter(|_| c.kind.is_thread());
-    let explicit = watch
+    watch
         .channels
         .get(&c.id)
         .or_else(|| parent.and_then(|p| watch.channels.get(&p)))
-        .or_else(|| c.guild_id.and_then(|g| watch.guilds.get(&g)));
-    if let Some(level) = explicit {
-        return (*level, true);
+        .or_else(|| c.guild_id.and_then(|g| watch.guilds.get(&g)))
+        .copied()
+}
+
+/// The level, and whether it was set in tritone.
+fn watch_of(c: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> (WatchLevel, bool) {
+    if let Some(level) = explicit_watch(c, watch) {
+        return (level, true);
     }
     if live.discord_muted(c.id, now_ms) {
         (WatchLevel::Muted, false)

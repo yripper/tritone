@@ -75,6 +75,19 @@ impl AppState {
         *self.api.write().unwrap_or_else(|e| e.into_inner()) = api;
     }
 
+    /// A login found in the keyring: if `LiveState::try_login_with` accepts
+    /// it, drops the old REST client (it holds the dead token) and wakes the
+    /// gateway. Returns whether it did. Callers check first that the
+    /// connection is halted on `NeedsLogin`.
+    pub fn accept_login(&self, token: &str) -> bool {
+        if !self.live.try_login_with(token) {
+            return false;
+        }
+        self.set_api(None);
+        self.login_notify.notify_one();
+        true
+    }
+
     /// The connected context. A halted connection returns its reason (e.g.
     /// `NeedsLogin`, whose text says to run `tritone login`); no client yet
     /// means `NotConnected`.

@@ -172,6 +172,18 @@ impl LiveState {
                     g.my_roles = roles;
                 }
             }
+            GatewayEvent::RoleUpsert { guild, role } => {
+                if let Some(g) = self.lock().guilds.get_mut(&guild) {
+                    g.roles.retain(|r| r.id != role.id);
+                    g.roles.push(role);
+                }
+            }
+            GatewayEvent::RoleDelete { guild, role } => {
+                if let Some(g) = self.lock().guilds.get_mut(&guild) {
+                    g.roles.retain(|r| r.id != role);
+                    g.my_roles.retain(|r| *r != role);
+                }
+            }
             GatewayEvent::GuildDelete(id) => {
                 let mut inner = self.lock();
                 inner.guilds.remove(&id);
@@ -208,10 +220,16 @@ impl LiveState {
     }
 
     /// Discord rejected this token (gateway close 4004, REST 401): halt with
-    /// `NeedsLogin` and remember it, so it's never tried again.
+    /// `NeedsLogin` and remember it, so it's never tried again. A token older
+    /// than the login in use (a stale client's late 401) is ignored, so it
+    /// can't halt the new session.
     pub fn reject_token(&self, token: &str) {
+        let hash = token_hash(token);
         let mut inner = self.lock();
-        inner.login_token = Some(token_hash(token));
+        if inner.login_token.is_some_and(|current| current != hash) {
+            return;
+        }
+        inner.login_token = Some(hash);
         inner.halt = Some(DiscordError::NeedsLogin);
     }
 

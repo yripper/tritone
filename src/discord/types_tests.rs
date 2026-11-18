@@ -62,3 +62,11 @@ fn halting_errors() {
     assert!(!DiscordError::Http("x".into()).halts());
     assert!(DiscordError::Captcha.to_string().contains("official app"));
 }
+
+#[test]
+fn gateway_closed_halts_and_says_restart() {
+    let e = DiscordError::GatewayClosed { code: 4011 };
+    assert!(e.halts());
+    assert_eq!(e.kind(), "gateway_closed");
+    assert_eq!(e.to_string(), "Discord closed the session (code 4011): restart tritone (pm2 restart tritone)");
+}

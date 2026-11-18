@@ -44,8 +44,7 @@ impl TritoneServer {
     /// never wakes it, so polling `status` can't drive an identify loop.
     async fn needs_login(&self) -> (&'static str, Option<String>) {
         match self.state.secrets.get(ACCOUNT_TOKEN).await {
-            Ok(Some(token)) if self.state.live.try_login_with(&token) => {
-                self.state.login_notify.notify_one();
+            Ok(Some(token)) if self.state.accept_login(&token) => {
                 let note = "a new login was found in the keyring; reconnecting. Call status again in a few seconds.";
                 ("connecting", Some(note.to_string()))
             }

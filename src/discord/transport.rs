@@ -190,6 +190,18 @@ impl CookieJar {
         }
     }
 
+    /// Replaces the jar's contents with the keyring's, in place, so the
+    /// clients and the saver holding this jar see what `tritone login` just
+    /// wrote (the login runs in another process). Clears `dirty`: the
+    /// daemon's older cookies must not be saved over the login's.
+    pub async fn reload(&self, secrets: &dyn SecretStore) -> Result<()> {
+        let fresh = CookieJar::load(secrets).await?;
+        let store = std::mem::take(&mut *fresh.lock());
+        *self.lock() = store;
+        self.dirty.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+
     /// Changed since the last save.
     pub fn is_dirty(&self) -> bool {
         self.dirty.load(Ordering::SeqCst)

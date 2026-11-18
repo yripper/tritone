@@ -3,7 +3,7 @@
 Last verified: 2026-11-19
 
 ## Purpose
-The logic between the MCP tools and Discord: errors, time, the live model, the send queue, the contribution log, paced search and voice.
+The logic between the MCP tools and Discord: errors, time, the live model, the send queue, the contribution log, paced search, voice and cleanup.
 
 ## Structure
 - `src/domain/errors.rs`: `Error`, `Result`.
@@ -13,6 +13,7 @@ The logic between the MCP tools and Discord: errors, time, the live model, the s
 - `src/domain/activity.rs`: the contribution log: `classify`, `record_own`, `spawn_recorder`, `backfill`, `my_activity`, plus `channel_label` and `message_link`. Tests: `src/domain/activity_tests.rs`.
 - `src/domain/paced_search.rs`: `SearchPacer`, Discord search one at a time with a random 3–6 s gap, for voice and cleanup. Tests: `src/domain/paced_search_tests.rs`.
 - `src/domain/voice.rs`: tone profiles per category, notes per channel, categories, own-message samples through search. Tests: `src/domain/voice_tests.rs`.
+- `src/domain/cleanup.rs`: `cleanup_plan` and `cleanup_apply`. Tests: `src/domain/cleanup_tests.rs`.
 - `src/domain/test_api.rs` (`cfg(test)`): `Api`, a `FakeDiscord` wrapper that stamps each call with `FakeTimer` time and fails the nth call of a method once (`fail_on`, `fail_on_nth`).
 
 ## Public surface
@@ -63,6 +64,11 @@ The logic between the MCP tools and Discord: errors, time, the live model, the s
   - `own_messages_in_category(ctx, pacer, category, except, limit)` (`src/domain/voice.rs:236`): at most 3 places: first the channels the user wrote in most recently (`own_message` and the contribution log) whose category matches, then channels and servers set to the category; a server is searched as a whole, keeping hits whose channel is in the category.
   - `get_voice(ctx, pacer, channel)` (`src/domain/voice.rs:298`) → `VoiceReport`: the context, plus `my_messages_in_channel` when `needs_learning || notes_stale` and `my_messages_in_category` when `needs_learning`. A fresh profile and notes make no search.
   - `save_profile` (`src/domain/voice.rs:318`), `save_chat_notes` (`:325`), `set_category` (`:332`) validate the slug and length, then write the store.
+- Cleanup (`src/domain/cleanup.rs`). Item ids: `leave:<server>`, `mute:<server>`, `mute:<server>/<channel>`, `read:<server>`.
+  - `cleanup_plan(ctx)` (`src/domain/cleanup.rs:209`) / `cleanup_plan_with(ctx, pacer)` (`:223`) → `CleanupPlan { servers, lookups_pending, note }`; each `ServerEntry` (`src/domain/cleanup.rs:57`) has `label`, `member_count`, `muted_in_discord`, `unread_channels` (visible, non-category, unread), `my_last_post` (a date), `last_post_known`, `full_watch`, `owner`, `suggestion` and `items` (`PlanItem { item, does }`). Changes nothing.
+  - The last post: the local log (`own_message` and `activity`) when it shows a post in the last 60 days; else a `kv` cache (`cleanup_last_post:<guild>`, 24 h); else one paced `search(Guild(g), author_id = me)` (`look_up_last_post`, `src/domain/cleanup.rs:133`), its hits recorded in `own_message`. At most `MAX_LOOKUPS_PER_PLAN` (8) searches per call, servers with no local post and the most unread first; the rest stay unknown and get no suggestion. A non-halting search error leaves the server unknown; a halting one returns.
+  - Suggestions (`suggest`, `src/domain/cleanup.rs:162`): `leave` with no post in 180 days, nothing on full watch (the server or a channel in it) and not the owner; `mute` with more than 20 unread channels, no post in 60 days, and not already muted. A noisy server (over 20 unread) the user posted in within 60 days instead gets up to 5 `mute:<server>/<channel>` items for unread channels they never wrote in, that aren't muted or on full watch (`plan_items`, `src/domain/cleanup.rs:174`). `read:<server>` is offered whenever something is unread.
+  - `cleanup_apply(ctx, items)` (`src/domain/cleanup.rs:395`) / `cleanup_apply_with(ctx, items, rng)` (`:403`) → `Vec<ApplyResult { item, status: done|failed|skipped, detail }>`. Runs the items in order, exactly as given; each request waits a random 2–4 s after the previous one (`Pace`, `src/domain/cleanup.rs:348`). `read:<server>` acks the server's unread channels with `ack_bulk` in chunks of 100 and updates `live`. A malformed item or one for a server or channel the user isn't in fails alone; a repeat is skipped; a halting error halts tritone (`halt_everything`) and skips the rest.
 
 ## Dependencies
 chrono, rand, sha2 (token hash), serde, tokio (sync broadcast and mutex, spawn), the `discord` types, the `store`, `config::Topic`, and `mcp::state::Ctx` (backfill, paced search, voice).
@@ -74,6 +80,7 @@ chrono, rand, sha2 (token hash), serde, tokio (sync broadcast and mutex, spawn),
 - Queue text lives only in memory and is dropped when the job finishes; a restart drops unsent jobs. A job is retried only where a nonce makes the retry safe (once after a rate limit, once promptly after an unknown outcome); a write that may have gone out is `unknown`, never `failed`, so it isn't approved and sent twice.
 - `SendQueue::resume` is the only path that calls `live.clear_halt()` and `DiscordApi::clear_halt()`, and only the `resume_queue` tool (on the user's explicit OK) calls it. The tool first attaches the client `AppState` holds now.
 - Voice never stores message text: samples come from search on each `get_voice` call that needs them. `own_message` keeps ids and times for 22 days (`OWN_MESSAGE_KEEP_MS`), enough for the 21-day staleness window. DMs sent through tritone are not in the contribution log, so they still count toward a DM's staleness.
+- `cleanup_plan` is bounded to 8 searches per call so the tool returns in under a minute; callers loop while `lookups_pending > 0`.
 - `SearchPacer::global()` paces voice and cleanup searches together; `backfill` keeps its own pacing, so a backfill running at the same time can interleave with them.
 - A halt is separate from the gateway's state: Disconnected, RESUMED and READY never lift it, so a routine reconnect can't silently resume after a CAPTCHA or a block.
 

@@ -80,3 +80,22 @@ fn recent_own_channels_merge_both_logs_newest_first() {
     s.record_activity(&row).unwrap();
     assert_eq!(s.recent_own_channels(10).unwrap(), [(Id(200), None), (Id(300), Some(Id(20))), (Id(100), Some(Id(10)))]);
 }
+
+#[test]
+fn last_post_and_channels_per_guild_come_from_both_logs() {
+    let s = Store::open_in_memory().unwrap();
+    assert_eq!(s.last_own_post_in_guild(Id(10)).unwrap(), None);
+    s.record_own_messages(&[own(1, 100, Some(10), NOW - 3 * DAY), own(2, 200, None, NOW)], NOW).unwrap();
+    let row = ActivityRow {
+        message_id: Id(3),
+        guild_id: Id(10),
+        channel_id: Id(101),
+        created_at: NOW - DAY,
+        kind: "other".into(),
+        is_reply: false,
+        via_tritone: false,
+    };
+    s.record_activity(&row).unwrap();
+    assert_eq!(s.last_own_post_in_guild(Id(10)).unwrap(), Some(NOW - DAY));
+    assert_eq!(s.own_channels_in_guild(Id(10)).unwrap(), [Id(100), Id(101)].into_iter().collect());
+}

@@ -165,6 +165,30 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
+    /// The newest own message in a server that tritone knows of (Unix ms),
+    /// from `own_message` and the contribution log.
+    pub fn last_own_post_in_guild(&self, guild: Id) -> Result<Option<i64>> {
+        Ok(self.conn().query_row(
+            "SELECT MAX(created_at) FROM (
+                SELECT created_at FROM own_message WHERE guild_id = ?1
+                UNION ALL SELECT created_at FROM activity WHERE guild_id = ?1
+             )",
+            [guild.to_string()],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Channels of a server where tritone knows the user wrote.
+    pub fn own_channels_in_guild(&self, guild: Id) -> Result<HashSet<Id>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT channel_id FROM own_message WHERE guild_id = ?1
+             UNION SELECT channel_id FROM activity WHERE guild_id = ?1",
+        )?;
+        let rows = stmt.query_map([guild.to_string()], |r| parse_id(r.get(0)?))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
     /// Which of these messages went out through tritone's queue.
     pub fn sent_via_tritone(&self, ids: &[Id]) -> Result<HashSet<Id>> {
         if ids.is_empty() {

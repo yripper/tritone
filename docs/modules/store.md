@@ -20,7 +20,7 @@ All tables are created in v1, so features add methods, not migrations:
 
 ## Public surface
 - `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
-- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
+- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `cleanup_last_post:<guild>` (cleanup's searched last post, JSON `{checked_at, last}`, trusted 24 h), `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:42`).
 - `get_watch`, `set_watch` (`None` clears), `all_watch` (`src/store/watch.rs:61`, `:70`, `:84`).
@@ -33,7 +33,8 @@ All tables are created in v1, so features add methods, not migrations:
   - `category(target)`, `set_category(target, category)`, `targets_in_category(category)` (`src/store/voice.rs:89`, `:96`, `:105`). `target_id` is a channel or a server id.
   - `record_own_messages(rows, now_ms)` (`src/store/voice.rs:114`): insert-or-ignore, then prunes rows older than `OWN_MESSAGE_KEEP_MS` (22 days).
   - `own_count_in_channel(channel, since_ms)` and `own_since(since_ms)` (`src/store/voice.rs:135`, `:145`): strictly after `since_ms`, leaving out messages the contribution log marks `via_tritone`.
-  - `recent_own_channels(limit)` (`src/store/voice.rs:156`): `(channel, guild)` newest first, from `own_message` and `activity` together. `sent_via_tritone(ids)` (`src/store/voice.rs:169`).
+  - `recent_own_channels(limit)` (`src/store/voice.rs:156`): `(channel, guild)` newest first, from `own_message` and `activity` together. `sent_via_tritone(ids)` (`src/store/voice.rs:193`).
+  - `last_own_post_in_guild(guild)` and `own_channels_in_guild(guild)` (`src/store/voice.rs:170`, `:182`): from `own_message` and `activity` together, for cleanup.
 
 ## Dependencies
 rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.

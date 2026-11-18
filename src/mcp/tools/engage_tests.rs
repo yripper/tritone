@@ -80,3 +80,21 @@ async fn unknown_channels_are_refused() {
     let notes = Parameters(NotesArgs { channel: "general".into(), body: "x".into() });
     assert_eq!(s.save_chat_notes(notes).await.unwrap().is_error, Some(true));
 }
+
+#[tokio::test]
+async fn cleanup_tools_plan_then_apply_only_the_given_items() {
+    let (s, api) = server();
+    let v = out(&s.cleanup_plan().await.unwrap());
+    let g = &v["servers"][0];
+    assert_eq!((g["id"].clone(), g["suggestion"].clone()), ("10".into(), "leave".into()), "{v}");
+    assert_eq!(g["items"][0]["item"], "leave:10");
+    assert!(
+        !api.calls().iter().any(|c| matches!(c, crate::discord::fake::Call::LeaveGuild(_))),
+        "a plan changes nothing"
+    );
+
+    let args = Parameters(ApplyArgs { items: vec!["mute:10".into()] });
+    let v = out(&s.cleanup_apply(args).await.unwrap());
+    assert_eq!(v["results"][0]["status"], "done", "{v}");
+    assert!(!api.calls().iter().any(|c| matches!(c, crate::discord::fake::Call::LeaveGuild(_))));
+}

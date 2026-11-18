@@ -9,7 +9,7 @@ use crate::discord::types::Id;
 use crate::domain::errors::{Error, Result as DResult};
 use crate::domain::live::LiveState;
 use crate::domain::paced_search::SearchPacer;
-use crate::domain::voice;
+use crate::domain::{cleanup, voice};
 use crate::mcp::server::{TritoneServer, json};
 
 #[derive(Deserialize, schemars::JsonSchema)]
@@ -40,6 +40,17 @@ pub struct CategoryArgs {
     pub target: String,
     /// A slug like dev-community, work, friends or general.
     pub category: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ApplyArgs {
+    /// Item ids from cleanup_plan, each one approved by the user: leave:<server>, mute:<server>, mute:<server>/<channel> or read:<server>.
+    pub items: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Applied {
+    results: Vec<cleanup::ApplyResult>,
 }
 
 #[derive(Serialize)]
@@ -140,6 +151,22 @@ impl TritoneServer {
         let now = self.state.timer.now_ms();
         let stale = voice::stale_profiles(&self.state.store, &self.state.live, now);
         Ok(local(stale.map(|categories| Categories { categories })))
+    }
+
+    #[tool(
+        description = "Propose cleanup, changing nothing: every server with its unread channels, whether it's muted in Discord, when the user last posted there, whether it has full-watch channels, and a suggestion (leave after 180 days without a post, unless something there is on full watch or the user owns it; mute with more than 20 unread channels and no post in 60 days). Each server lists item ids to pass to cleanup_apply. The last post comes from Discord search, a few servers per call and a few seconds apart, cached for a day: when lookups_pending is above 0, call it again."
+    )]
+    async fn cleanup_plan(&self) -> Result<CallToolResult, McpError> {
+        Ok(self.run(|ctx| async move { cleanup::cleanup_plan(&ctx).await }).await)
+    }
+
+    #[tool(
+        description = "Carry out cleanup items from cleanup_plan, exactly as given, one at a time and a few seconds apart: leave:<server> leaves it, mute:<server> or mute:<server>/<channel> mutes it in Discord, read:<server> marks its unread channels read. Leaving and muting can't be undone from here: pass only items the user explicitly approved, each one on its own, never a whole list on a general OK. Stops at a CAPTCHA, a lock or a block."
+    )]
+    async fn cleanup_apply(&self, Parameters(a): Parameters<ApplyArgs>) -> Result<CallToolResult, McpError> {
+        Ok(self
+            .run(|ctx| async move { cleanup::cleanup_apply(&ctx, &a.items).await.map(|results| Applied { results }) })
+            .await)
     }
 }
 

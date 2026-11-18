@@ -22,10 +22,10 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - Activity tools (`src/mcp/tools/activity.rs`):
   - `my_activity{days?}` (`src/mcp/tools/activity.rs:50`): the last `days` (default 30, at least 1) through `domain::activity::my_activity`. Reads only the store and `LiveState`, so it works while halted.
   - `backfill_activity` (`src/mcp/tools/activity.rs:62`): refuses until the connection is `Ready` (before READY no guilds are known). Unless every guild is done, starts `domain::activity::backfill` in a background task, at most one at a time (`BACKFILL_RUNNING`, `src/mcp/tools/activity.rs:22`); returns `{ running, guilds_done, guilds_total, recorded, messages_seen, last_error?, note }`. A run that stops stores its error in `kv` `backfill_last_error`; the next call continues it.
-- Engage tools (`src/mcp/tools/engage.rs`), voice:
-  - `get_voice{channel}` (`src/mcp/tools/engage.rs:102`): through `run`, `domain::voice::get_voice` with `SearchPacer::global()`.
-  - `save_profile{category, body}` (`:114`), `save_chat_notes{channel, body}` (`:122`), `set_category{target, category}` (`:132`), `list_stale_profiles` (`:139`) touch only the store and `LiveState`, so they work while halted (`local`, `src/mcp/tools/engage.rs:71`).
-  - `channel` is an id, `<#id>` or a `discord.com/channels/...` link of a channel `LiveState` knows (`channel_arg`, `src/mcp/tools/engage.rs:83`); `target` may also be a server id (`target_arg`, `:89`).
+- Engage tools (`src/mcp/tools/engage.rs`):
+  - Voice: `get_voice{channel}` (`src/mcp/tools/engage.rs:113`), through `run`, calls `domain::voice::get_voice` with `SearchPacer::global()`. `save_profile{category, body}` (`:125`), `save_chat_notes{channel, body}` (`:133`), `set_category{target, category}` (`:143`) and `list_stale_profiles` (`:150`) touch only the store and `LiveState`, so they work while halted (`local`, `src/mcp/tools/engage.rs:82`).
+  - `channel` is an id, `<#id>` or a `discord.com/channels/...` link of a channel `LiveState` knows (`channel_arg`, `src/mcp/tools/engage.rs:94`); `target` may also be a server id (`target_arg`, `:100`).
+  - Cleanup: `cleanup_plan` (`src/mcp/tools/engage.rs:159`) and `cleanup_apply{items[]}` (`:166`) run `domain::cleanup` through `run`. The descriptions and the instructions say each item needs the user's own explicit OK.
 - The read and triage groups are empty so far.
 
 ## Other routes

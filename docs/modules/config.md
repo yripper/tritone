@@ -1,6 +1,6 @@
 # config
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 Runtime paths and the optional user config. All state lives in `~/.tritone/` (or `TRITONE_HOME`), never in the repo.

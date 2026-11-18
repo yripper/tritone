@@ -12,3 +12,5 @@ Open the ONE doc that matches the code you're touching. Don't load them all.
 | domain | `src/domain/` | [domain.md](domain.md) |
 | mcp | `src/mcp/` | [mcp.md](mcp.md) |
 | cli | `src/main.rs`, `src/cli/` | [cli.md](cli.md) |
+
+`src/lib.rs` only declares the modules above. `src/test_support.rs` (test-only fixture builders) has no doc of its own.

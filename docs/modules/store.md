@@ -20,7 +20,7 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 - **v2** (`src/store/schema.rs:58`) rebuilds `watch` keyed by `(target_id, kind)` and copies the rows: an older server's default channel has the server's own id, so a server level and a channel level can share an id.
 
 ## Public surface
-- `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
+- `Store::open` (`src/store/mod.rs:27`), `Store::open_in_memory` (`src/store/mod.rs:36`).
 - `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `cleanup_last_post:<guild>` (cleanup's searched last post, JSON `{checked_at, last, unsearchable}`, trusted 24 h; `unsearchable` marks a server that refused the search), `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:43`), part of the watch key.
@@ -34,14 +34,14 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
   - `add_opportunity(&row) -> bool` (`src/store/opportunity.rs:83`): insert-or-ignore, so the first rule wins and a dismissed one never reopens. `opportunity(id)` (`:99`). `open_opportunities(since_ms)` (`:111`): newest first.
   - `set_opportunity_status(id, status, now_ms) -> bool` (`src/store/opportunity.rs:122`); `opportunity_answered(id, now_ms) -> bool` (`:132`) changes only an open row.
   - `opportunities_answered_before(channel, own, now_ms)` (`src/store/opportunity.rs:142`, called for threads only): every open row in the channel for a message older than `own` becomes `answered`. `keep_newest_my_thread(channel, now_ms)` (`:152`): open `my_thread` rows in the channel other than the newest become `superseded`. Both compare ids as integers (`CAST(message_id AS INTEGER)`), not as text.
-  - `wrote_in(channel)` and `is_own_message(id)` (`src/store/opportunity.rs:164`, `:174`): from `own_message` and `activity` together.
+  - `wrote_in(channel)` and `is_own_message(id)` (`src/store/opportunity.rs:174`, `:174`): from `own_message` and `activity` together.
 - Voice (`src/store/voice.rs`), times in Unix ms:
   - `profile(category)`, `save_profile(category, body, now_ms)` (replaces), `profile_dates()` (no bodies) (`src/store/voice.rs:49`, `:53`, `:62`); `notes(channel)`, `save_notes(channel, body, now_ms)` (`:69`, `:73`).
-  - `category(target)`, `set_category(target, category)`, `targets_in_category(category)` (`src/store/voice.rs:89`, `:96`, `:105`). `target_id` is a channel or a server id.
+  - `category(target)`, `set_category(target, category)`, `targets_in_category(category)` (`src/store/voice.rs:105`, `:96`, `:105`). `target_id` is a channel or a server id.
   - `record_own_messages(rows, now_ms)` (`src/store/voice.rs:114`): insert-or-ignore, then prunes rows older than `OWN_MESSAGE_KEEP_MS` (22 days).
-  - `own_count_in_channel(channel, since_ms)` and `own_since(since_ms)` (`src/store/voice.rs:135`, `:145`): strictly after `since_ms`, leaving out messages the contribution log marks `via_tritone`.
+  - `own_count_in_channel(channel, since_ms)` and `own_since(since_ms)` (`src/store/voice.rs:145`, `:145`): strictly after `since_ms`, leaving out messages the contribution log marks `via_tritone`.
   - `recent_own_channels(limit)` (`src/store/voice.rs:156`): `(channel, guild)` newest first, from `own_message` and `activity` together. `sent_via_tritone(ids)` (`src/store/voice.rs:193`).
-  - `last_own_post_in_guild(guild)` and `own_channels_in_guild(guild)` (`src/store/voice.rs:170`, `:182`): from `own_message` and `activity` together, for cleanup.
+  - `last_own_post_in_guild(guild)` and `own_channels_in_guild(guild)` (`src/store/voice.rs:182`, `:182`): from `own_message` and `activity` together, for cleanup.
 
 ## Dependencies
 rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.

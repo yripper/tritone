@@ -49,14 +49,14 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - `AppState::ctx` (`src/mcp/state.rs:94`): a halted connection returns its `DiscordError` (e.g. `NeedsLogin`, "run `tritone login`"); no REST client yet returns `NotConnected`.
 - `AppState::accept_login(token)` (`src/mcp/state.rs:82`): the one place a login is accepted, shared by `status` and `/login-notify`: `try_login_with`, then `set_api(None)` (the old client holds the dead token), then `login_notify.notify_one()`. Callers check first that the connection is halted on `NeedsLogin`.
 - `AppState::set_api` (`src/mcp/state.rs:74`): the gateway stores the REST client here once it has a token.
-- `guard` (`src/mcp/http.rs:26`): 403 unless Host is `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding); 401 unless `Authorization: Bearer <token>`, compared in constant time; fails closed on an empty token.
+- `guard` (`src/mcp/http.rs:31`): 403 unless Host is `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding); 401 unless `Authorization: Bearer <token>`, compared in constant time; fails closed on an empty token.
 - `current_instructions` (`src/mcp/instructions.rs:81`): re-reads `~/.tritone/style.md` on every initialize and appends it as `## Writing style`.
 
 ## Dependencies
 rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pins 3.8.0), axum 0.8, tokio.
 
 ## Gotchas & invariants
-- rmcp 3.8 rejects a `#[tool_router]` impl with no `#[tool]` fn unless it has `allow_empty` (rmcp-macros 3.8.0 `src/tool_router.rs:65`). The empty group routers carry it; drop it when the group gets its first tool.
+- rmcp 3.8 rejects a `#[tool_router]` impl with no `#[tool]` fn unless it has `allow_empty` (rmcp-macros 3.8.0 `src/tool_router.rs:65`). Every group router has tools today, so none carries it; a new, still-empty group needs it.
 - Don't import a type named `Result` with one generic parameter into a file with `#[tool_handler]` or `#[tool_router]`: the macros expand code that uses `Result<T, E>` unqualified. Import the domain alias as `DResult`.
 - `#[tool_handler(router = self.tool_router)]` evaluates the expression on every call, so the merged router is built once and stored.
 - Stateless mode answers `tools/call` without a prior `initialize`, which the HTTP test relies on.

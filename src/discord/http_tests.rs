@@ -543,3 +543,34 @@ async fn a_401_asking_for_mfa_is_locked_and_keeps_the_token() {
     // The token wasn't marked dead.
     assert!(env.live.try_login_with(TOKEN));
 }
+
+#[tokio::test]
+async fn clear_halt_lets_calls_through_again_after_a_captcha() {
+    let env = env().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"captcha_key": ["captcha-required"]})))
+        .up_to_n_times(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&env.server)
+        .await;
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::Captcha));
+    // The user's explicit OK clears both halts (SendQueue::resume does this).
+    env.live.clear_halt();
+    env.api.clear_halt();
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Ok(vec![]));
+    assert_eq!(received(&env).await.len(), 2, "the next call reached Discord");
+}
+
+#[tokio::test]
+async fn clear_halt_never_lifts_a_dead_token() {
+    let env = env().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(401)).mount(&env.server).await;
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
+    env.live.clear_halt();
+    env.api.clear_halt();
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
+    assert_eq!(received(&env).await.len(), 1, "a rejected token stays halted until a new login rebuilds the client");
+}

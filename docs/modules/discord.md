@@ -116,7 +116,7 @@ rsa 0.9 (OAEP-SHA256, `rsa::rand_core::OsRng`), sha2, futures-util, serde, serde
 
 ## Gotchas & invariants
 - Never log tokens, cookies or message text from here. `HttpDiscord` network errors are reduced to "timed out" / "could not connect" / "request failed" (wreq's text names the URL).
-- A halt in `HttpDiscord` is permanent for that instance: a new login builds a new one (`rebuild_api`). Tests assert the halted call count stays at one request, including a send already waiting for its turn when the read before it halted.
+- A halt in `HttpDiscord` lasts until the user clears it: `clear_halt()` (`src/discord/http.rs:522`, the `DiscordApi` override `SendQueue::resume` calls together with `LiveState::clear_halt`) lifts a `Captcha`, `Locked` or `Blocked` halt, never `NeedsLogin`; a dead token needs a new login, which builds a new client (`rebuild_api`). Tests assert the halted call count stays at one request, including a send already waiting for its turn when the read before it halted.
 - Header order for `Authorization`/`Content-Type` within Chrome's set is a best guess; compare with a browser capture on the first live run.
 - `refresh` is the only code here that reaches discord.com without a token: the two unauthenticated GETs above. Tests never touch the network: they point `Endpoints` at wiremock.
 - `GuildUpsert` replaces the guild's whole channel set: the gateway must include the guild's joined threads in `channels`, or they're dropped. Use it for GUILD_CREATE only; GUILD_UPDATE is `GuildUpdate`.

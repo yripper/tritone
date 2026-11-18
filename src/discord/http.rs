@@ -515,6 +515,17 @@ impl DiscordApi for HttpDiscord {
         let u = a.body.get("user").unwrap_or(&a.body);
         parse_user(u).ok_or(DiscordError::Api { status: a.status, code: None })
     }
+
+    /// The user's explicit OK after a CAPTCHA, lock or block (through
+    /// `SendQueue::resume`, with `LiveState::clear_halt`). A dead token stays
+    /// halted: only a new login, which builds a new client, lifts that.
+    fn clear_halt(&self) {
+        let mut slot = self.halt.lock().unwrap_or_else(|e| e.into_inner());
+        if slot.as_ref().is_some_and(|e| *e != DiscordError::NeedsLogin) {
+            tracing::info!(kind = slot.as_ref().map_or("none", DiscordError::kind), "REST halt cleared by the user");
+            *slot = None;
+        }
+    }
 }
 
 /// The REST client for `token`, after reloading `jar` from the keyring (a

@@ -2,6 +2,8 @@
 //! network calls.
 
 pub mod api;
+#[cfg(test)]
+pub mod fake;
 pub mod gateway;
 pub mod types;
 

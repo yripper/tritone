@@ -91,9 +91,6 @@ fn instructions_cover_the_safety_rules() {
     }
 }
 
-struct NoopApi;
-impl crate::discord::DiscordApi for NoopApi {}
-
 #[tokio::test]
 async fn tools_report_not_connected_until_the_gateway_sets_the_client() {
     let state = test_state();
@@ -102,7 +99,50 @@ async fn tools_report_not_connected_until_the_gateway_sets_the_client() {
     assert_eq!(r.is_error, Some(true));
     assert!(serde_json::to_string(&r.content).unwrap().contains("not connected"));
 
-    state.set_api(Some(Arc::new(NoopApi)));
+    state.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
     let r = server.run(|_ctx| async { Ok(1) }).await;
     assert_ne!(r.is_error, Some(true));
+}
+
+#[tokio::test]
+async fn halted_connection_blocks_tools_and_status_says_needs_login() {
+    use crate::discord::gateway::GatewayEvent;
+    use crate::discord::types::DiscordError;
+    let state = test_state();
+    state.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
+    state.live.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), 0);
+    let server = TritoneServer::new(state.clone(), None);
+    let r = server.run(|_ctx| async { Ok(1) }).await;
+    assert_eq!(r.is_error, Some(true));
+    assert!(serde_json::to_string(&r.content).unwrap().contains("tritone login"));
+
+    let s = call_tool(state.clone(), "status").await;
+    assert_eq!(s["connection"], "needs_login");
+    assert!(s["note"].as_str().unwrap().contains("tritone login"));
+}
+
+#[tokio::test]
+async fn status_wakes_the_gateway_after_a_new_login() {
+    use crate::discord::gateway::GatewayEvent;
+    use crate::discord::types::DiscordError;
+    let state = test_state();
+    state.live.apply(GatewayEvent::Halted(DiscordError::NeedsLogin), 0);
+    state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok").await.unwrap();
+    let s = call_tool(state.clone(), "status").await;
+    assert_eq!(s["connection"], "needs_login");
+    assert!(s["note"].as_str().unwrap().contains("reconnecting"));
+    // notify_one stores a permit, so this returns at once.
+    tokio::time::timeout(std::time::Duration::from_secs(1), state.login_notify.notified()).await.unwrap();
+}
+
+#[tokio::test]
+async fn status_reports_ready_user_and_guild_count() {
+    use crate::discord::gateway::GatewayEvent;
+    use crate::test_support::{guild, ready};
+    let state = test_state();
+    state.live.apply(GatewayEvent::Ready(Box::new(ready(7, vec![guild(1), guild(2)], vec![]))), 5);
+    let s = call_tool(state, "status").await;
+    assert_eq!(s["connection"], "ready");
+    assert_eq!(s["user"], "U007");
+    assert_eq!(s["guilds"], 2);
 }

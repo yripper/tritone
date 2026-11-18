@@ -12,7 +12,8 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `src/discord/gateway/mod.rs`: `spawn` (a stub that returns at once) and the `GatewayEvent` re-export; `src/discord/gateway/events.rs`: `GatewayEvent`.
 - `src/discord/fingerprint.rs`: `Fingerprint` (super-properties, REST and WebSocket headers), the build-number scrape, the installation id.
 - `src/discord/transport.rs`: `http_client` (wreq + Chrome emulation + cookie jar), `ws_connect`, `CookieJar`, `ChromeIdentity`.
-- Tests: `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
+- `src/discord/parse.rs`: Discord JSON to the model (`parse_message`, `parse_user`, `parse_channel`), shared by REST and the gateway.
+- Tests: `src/discord/parse_tests.rs`, `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
 
 ## Public surface
 - `Id(pub u64)` (`src/discord/types.rs:16`): `Copy + Eq + Hash + Ord + Default`. Serde writes a decimal string and reads a string or a number; `Display`/`FromStr`; `JsonSchema` (a digit string), so tool arguments can take it.
@@ -27,6 +28,12 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `DiscordError` (`src/discord/types.rs:259`): `NeedsLogin`, `Captcha`, `Locked`, `Blocked`, `RateLimited`, `Indexing`, `Forbidden`, `NotFound`, `Api { status, code }`, `Http`. Display says what the user must do. `halts()` (`src/discord/types.rs:292`) is true for `NeedsLogin | Captcha | Locked | Blocked`: nothing retries those. `kind()` (`src/discord/types.rs:300`) is log-safe.
 - `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`.
 - `GatewayEvent` (`src/discord/gateway/events.rs:6`): `Ready`, `Resumed`, `MessageCreate`, `MessageAck`, `ChannelUpsert`, `ChannelDelete`, `GuildUpsert(guild, channels)` (GUILD_CREATE), `GuildUpdate(guild)` (GUILD_UPDATE: keeps channels and my roles), `MyRolesUpdate { guild, roles }` (GUILD_MEMBER_UPDATE for self), `GuildDelete`, `SettingsUpdate`, `Disconnected`, `Halted`. On close 4004 the gateway calls `LiveState::reject_token` rather than sending `Halted(NeedsLogin)`, so the dead token is remembered.
+
+## Parsing (`src/discord/parse.rs`)
+`pub(crate)`, shared by the REST client and the gateway; REST and gateway objects have the same shape. https://docs.discord.food/resources/message, https://docs.discord.food/resources/channel
+- `parse_message(&Value) -> Option<Message>` (`src/discord/parse.rs:72`): `None` without id, channel or author. `timestamp` (RFC 3339) → ms, else the id's time; `edited` = `edited_timestamp` not null; `reply_to` from `message_reference.message_id`, `reply_to_author` from `referenced_message.author.id` (null when deleted); attachments → `"image: a.png"` (content type `image/*`, else a known image extension) or `"file: b.pdf"`; embeds → titles, untitled ones dropped; reactions → `(":name:", n)` for custom emoji, `("👍", n)` for unicode.
+- `parse_user` (`src/discord/parse.rs:39`): `global_name` is the display name (empty → `None`).
+- `parse_channel` (`src/discord/parse.rs:121`): `None` without id or type; overwrite `type` 0/1 or `"role"`/`"member"`, `allow`/`deny` as decimal strings. `recipients` must be full user objects (READY's `recipient_ids` are the gateway's job).
 
 ## Fingerprint (`src/discord/fingerprint.rs:46`)
 Identity: Discord web in Chrome. Fields: `user_agent`, `browser_version`, `os`, `os_version`, `locale` (a Discord locale), `timezone` (IANA, `UTC` fallback), `build_number`, `installation_id`, plus `sec_ch_ua` and `sec_ch_ua_platform` (same Chrome profile as the UA).

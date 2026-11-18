@@ -313,6 +313,21 @@ fn a_rejected_token_is_never_tried_again() {
 }
 
 #[test]
+fn a_stale_token_cannot_reject_a_newer_login() {
+    // The old REST client (or a late 4004) answering 401 with the old token
+    // after a new login was accepted must not halt the new session.
+    let l = ready_live();
+    l.reject_token("tok-old");
+    assert!(l.try_login_with("tok-new"));
+    l.reject_token("tok-old");
+    assert_eq!(l.connection(), ConnState::Connecting);
+    assert!(!l.try_login_with("tok-new"), "the new login stays the one already tried");
+    // The current token can still be rejected.
+    l.reject_token("tok-new");
+    assert_eq!(l.connection(), ConnState::Halted(DiscordError::NeedsLogin));
+}
+
+#[test]
 fn a_token_tried_once_while_halted_is_not_tried_twice() {
     // Even if the gateway halts without naming the token, waking it with the
     // same token twice would loop identifies.

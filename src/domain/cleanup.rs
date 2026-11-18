@@ -4,7 +4,8 @@
 //! approved one by one.
 //!
 //! Item ids: `leave:<server>`, `mute:<server>`, `mute:<server>/<channel>`
-//! and `read:<server>` (mark the server's unread channels read).
+//! and `read:<server>@<newest>` (mark the server's unread channels read, up
+//! to the newest message the plan saw; anything newer stays unread).
 
 use std::collections::HashSet;
 
@@ -16,6 +17,7 @@ use crate::domain::errors::{Error, Result};
 use crate::domain::live::{ConnState, LiveState};
 use crate::domain::paced_search::SearchPacer;
 use crate::domain::pending::explicit_watch;
+use crate::domain::resolve::channel_label;
 use crate::domain::send_queue::halt_everything;
 use crate::domain::voice::observe_own;
 use crate::mcp::state::Ctx;
@@ -208,7 +210,9 @@ fn plan_items(
     }
     if !f.unread.is_empty() {
         let n = f.unread.len();
-        items.push(PlanItem { item: format!("read:{g}"), does: format!("mark {n} unread channels read") });
+        // Unread is sorted newest first: the plan-time cutoff.
+        let cutoff = f.unread[0].1;
+        items.push(PlanItem { item: format!("read:{g}@{cutoff}"), does: format!("mark {n} unread channels read") });
     }
     Ok(items)
 }
@@ -312,6 +316,28 @@ pub struct ApplyResult {
     pub status: ApplyStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// For `read:`: channels with messages newer than the plan, left unread
+    /// for the user to see.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub unseen: Vec<UnseenChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnseenChannel {
+    pub channel_id: String,
+    pub channel: String,
+}
+
+/// What one action did.
+struct Outcome {
+    detail: String,
+    unseen: Vec<UnseenChannel>,
+}
+
+impl From<&str> for Outcome {
+    fn from(detail: &str) -> Outcome {
+        Outcome { detail: detail.into(), unseen: vec![] }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -319,19 +345,24 @@ enum Action {
     Leave(Id),
     MuteGuild(Id),
     MuteChannel(Id, Id),
-    Read(Id),
+    /// The server, and the newest message the plan saw there.
+    Read(Id, Id),
 }
 
 fn parse_item(item: &str, live: &LiveState) -> std::result::Result<Action, String> {
     let bad = || {
         format!(
-            "\"{item}\" is not a cleanup item (leave:<server>, mute:<server>, mute:<server>/<channel>, read:<server>)"
+            "\"{item}\" is not a cleanup item (leave:<server>, mute:<server>, mute:<server>/<channel>, read:<server>@<newest>)"
         )
     };
     let (verb, rest) = item.trim().split_once(':').ok_or_else(bad)?;
     let (g, c) = match rest.split_once('/') {
         Some((g, c)) => (g, Some(c)),
         None => (rest, None),
+    };
+    let (g, cutoff) = match g.split_once('@') {
+        Some((g, at)) => (g, Some(at.parse::<Id>().map_err(|_| bad())?)),
+        None => (g, None),
     };
     let g: Id = g.parse().map_err(|_| bad())?;
     if live.guild(g).is_none() {
@@ -343,11 +374,11 @@ fn parse_item(item: &str, live: &LiveState) -> std::result::Result<Action, Strin
     {
         return Err(format!("channel {c} is not in server {g}"));
     }
-    match (verb, c) {
-        ("leave", None) => Ok(Action::Leave(g)),
-        ("mute", None) => Ok(Action::MuteGuild(g)),
-        ("mute", Some(c)) => Ok(Action::MuteChannel(g, c)),
-        ("read", None) => Ok(Action::Read(g)),
+    match (verb, c, cutoff) {
+        ("leave", None, None) => Ok(Action::Leave(g)),
+        ("mute", None, None) => Ok(Action::MuteGuild(g)),
+        ("mute", Some(c), None) => Ok(Action::MuteChannel(g, c)),
+        ("read", None, Some(at)) => Ok(Action::Read(g, at)),
         _ => Err(bad()),
     }
 }
@@ -371,7 +402,7 @@ impl Pace<'_> {
 }
 
 /// Runs one action, pacing every request.
-async fn run_action(ctx: &Ctx, action: Action, pace: &mut Pace<'_>) -> std::result::Result<String, DiscordError> {
+async fn run_action(ctx: &Ctx, action: Action, pace: &mut Pace<'_>) -> std::result::Result<Outcome, DiscordError> {
     match action {
         Action::Leave(g) => {
             pace.wait().await;
@@ -386,18 +417,44 @@ async fn run_action(ctx: &Ctx, action: Action, pace: &mut Pace<'_>) -> std::resu
             let target = MuteTarget::Channel { guild: Some(g), channel: c };
             ctx.api.set_mute(target, true).await.map(|_| "channel muted in Discord".into())
         }
-        Action::Read(g) => {
-            let unread = unread_channels(&ctx.live, g);
-            for chunk in unread.chunks(ACK_CHUNK) {
-                pace.wait().await;
-                ctx.api.ack_bulk(chunk).await?;
-                for (c, m) in chunk {
-                    ctx.live.note_acked(*c, *m);
-                }
-            }
-            Ok(format!("marked {} channels read", unread.len()))
+        Action::Read(g, cutoff) => mark_read_until(ctx, g, cutoff, pace).await,
+    }
+}
+
+/// Acks the server's unread channels whose newest message is no newer than
+/// `cutoff`, the newest the user approved in the plan. A channel with
+/// anything newer is left unread and reported, so a mention that arrived
+/// after the OK is never hidden.
+async fn mark_read_until(
+    ctx: &Ctx,
+    g: Id,
+    cutoff: Id,
+    pace: &mut Pace<'_>,
+) -> std::result::Result<Outcome, DiscordError> {
+    let unread = unread_channels(&ctx.live, g);
+    let (ack, newer): (Vec<_>, Vec<_>) = unread.into_iter().partition(|(_, m)| *m <= cutoff);
+    for chunk in ack.chunks(ACK_CHUNK) {
+        pace.wait().await;
+        ctx.api.ack_bulk(chunk).await?;
+        for (c, m) in chunk {
+            ctx.live.note_acked(*c, *m);
         }
     }
+    let unseen: Vec<UnseenChannel> = newer
+        .iter()
+        .map(|(c, _)| UnseenChannel {
+            channel_id: c.to_string(),
+            channel: ctx.live.channel(*c).map(|ch| channel_label(&ch, &ctx.live)).unwrap_or_default(),
+        })
+        .collect();
+    let mut detail = format!("marked {} channels read", ack.len());
+    if !unseen.is_empty() {
+        detail.push_str(&format!(
+            "; {} got messages after the plan and stay unread (see unseen): show them to the user",
+            unseen.len()
+        ));
+    }
+    Ok(Outcome { detail, unseen })
 }
 
 /// Applies the items, with the real random gap.
@@ -415,7 +472,8 @@ pub async fn cleanup_apply_with(ctx: &Ctx, items: &[String], rng: &dyn GapRng) -
     let mut pace = Pace { ctx, rng, last: None };
     let mut stopped: Option<String> = None;
     for item in items {
-        let result = |status, detail: String| ApplyResult { item: item.clone(), status, detail: Some(detail) };
+        let result =
+            |status, detail: String| ApplyResult { item: item.clone(), status, detail: Some(detail), unseen: vec![] };
         if let Some(why) = &stopped {
             out.push(result(ApplyStatus::Skipped, format!("not run: {why}")));
             continue;
@@ -437,7 +495,7 @@ pub async fn cleanup_apply_with(ctx: &Ctx, items: &[String], rng: &dyn GapRng) -
             continue;
         }
         match run_action(ctx, action, &mut pace).await {
-            Ok(done) => out.push(result(ApplyStatus::Done, done)),
+            Ok(done) => out.push(ApplyResult { unseen: done.unseen, ..result(ApplyStatus::Done, done.detail) }),
             Err(e) => {
                 if e.halts() {
                     halt_everything(&ctx.live, &e);

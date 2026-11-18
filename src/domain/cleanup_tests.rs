@@ -85,6 +85,11 @@ fn entry(plan: &CleanupPlan, g: u64) -> &ServerEntry {
     plan.servers.iter().find(|s| s.id == Id(g)).unwrap()
 }
 
+/// `read:<g>@<cutoff>`, the cutoff being the newest unread message, C<newest>'s.
+fn read_item(g: u64, newest: u64) -> String {
+    format!("read:{g}@{}", id_at(T0 - DAY + newest as i64))
+}
+
 fn items(plan: &CleanupPlan, g: u64) -> Vec<String> {
     entry(plan, g).items.iter().map(|i| i.item.clone()).collect()
 }
@@ -99,7 +104,7 @@ async fn plan_suggests_leave_for_stale_guild() {
     assert_eq!(g10.suggestion, Some(Suggestion::Leave));
     assert_eq!(g10.unread_channels, 1);
     assert!(g10.my_last_post.is_some());
-    assert_eq!(items(&plan, 10), ["leave:10", "read:10"]);
+    assert_eq!(items(&plan, 10), ["leave:10".to_string(), read_item(10, 100)]);
 
     let g20 = entry(&plan, 20);
     assert_eq!(g20.suggestion, None, "posted 10 days ago");
@@ -107,7 +112,7 @@ async fn plan_suggests_leave_for_stale_guild() {
 
     // 21 unread channels and nothing for 90 days: mute, not leave.
     assert_eq!(entry(&plan, 30).suggestion, Some(Suggestion::Mute));
-    assert_eq!(items(&plan, 30), ["mute:30", "read:30"]);
+    assert_eq!(items(&plan, 30), ["mute:30".to_string(), read_item(30, 320)]);
 
     // Never posted, but I own it: never leave.
     assert_eq!(entry(&plan, 40).suggestion, None);
@@ -214,7 +219,7 @@ async fn apply_runs_only_listed_items() {
 #[tokio::test]
 async fn apply_read_acks_the_servers_unread_channels() {
     let r = rig();
-    let out = cleanup_apply_with(&r.ctx, &["read:30".to_string()], &r.gaps).await.unwrap();
+    let out = cleanup_apply_with(&r.ctx, &[read_item(30, 320)], &r.gaps).await.unwrap();
     assert_eq!(out[0].status, ApplyStatus::Done);
     let acked: usize = r
         .api
@@ -232,7 +237,7 @@ async fn apply_read_acks_the_servers_unread_channels() {
 #[tokio::test]
 async fn apply_spaces_actions() {
     let r = rig();
-    let given = ["mute:10", "mute:30", "read:20"].map(String::from);
+    let given = ["mute:10".to_string(), "mute:30".to_string(), read_item(20, 200)];
     cleanup_apply_with(&r.ctx, &given, &r.gaps).await.unwrap();
     let times = r.api.times_of(|c| matches!(c, Call::SetMute { .. } | Call::AckBulk(_)));
     assert_eq!(times, [0, 2_000, 4_000]);
@@ -264,4 +269,35 @@ async fn backfill_and_cleanup_searches_never_overlap() {
     assert!(searches.len() >= 4, "{searches:?}");
     assert_eq!(r.api.max_concurrent_searches(), 1, "one search at a time");
     assert!(searches.windows(2).all(|w| w[1] - w[0] >= 3_000), "3-6 s between any two: {searches:?}");
+}
+
+#[tokio::test]
+async fn read_never_acks_past_the_plan_cutoff() {
+    let r = rig();
+    let item = read_item(30, 320);
+    // After the plan, a mention lands in C305.
+    let mut ping = msg(id_at(T0), 305, 2, "fake text");
+    ping.guild_id = Some(Id(30));
+    ping.mentions = vec![Id(ME)];
+    r.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(ping)), T0);
+
+    let out = cleanup_apply_with(&r.ctx, &[item], &r.gaps).await.unwrap();
+    assert_eq!(out[0].status, ApplyStatus::Done, "{out:?}");
+    let acked: Vec<Id> = r
+        .api
+        .calls()
+        .into_iter()
+        .flat_map(|c| match c {
+            Call::AckBulk(items) => items.into_iter().map(|(c, _)| c).collect(),
+            _ => vec![],
+        })
+        .collect();
+    assert_eq!(acked.len(), 20);
+    assert!(!acked.contains(&Id(305)), "nothing past the cutoff is acked");
+    assert!(r.ctx.live.is_unread(Id(305)));
+    assert_eq!(out[0].unseen.iter().map(|u| u.channel_id.as_str()).collect::<Vec<_>>(), ["305"]);
+
+    // An item without a cutoff isn't one cleanup_plan gives.
+    let bare = cleanup_apply_with(&r.ctx, &["read:20".to_string()], &r.gaps).await.unwrap();
+    assert_eq!(bare[0].status, ApplyStatus::Failed);
 }

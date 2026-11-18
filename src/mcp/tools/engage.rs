@@ -45,7 +45,7 @@ pub struct CategoryArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ApplyArgs {
-    /// Item ids from cleanup_plan, each one approved by the user: leave:<server>, mute:<server>, mute:<server>/<channel> or read:<server>.
+    /// Item ids from cleanup_plan, each one approved by the user: leave:<server>, mute:<server>, mute:<server>/<channel> or read:<server>@<newest>.
     pub items: Vec<String>,
 }
 
@@ -192,7 +192,7 @@ impl TritoneServer {
     }
 
     #[tool(
-        description = "Carry out cleanup items from cleanup_plan, exactly as given, one at a time and a few seconds apart: leave:<server> leaves it, mute:<server> or mute:<server>/<channel> mutes it in Discord, read:<server> marks its unread channels read. Leaving and muting can't be undone from here: pass only items the user explicitly approved, each one on its own, never a whole list on a general OK. Stops at a CAPTCHA, a lock or a block."
+        description = "Carry out cleanup items from cleanup_plan, exactly as given, one at a time and a few seconds apart: leave:<server> leaves it, mute:<server> or mute:<server>/<channel> mutes it in Discord, read:<server>@<newest> marks its unread channels read, but never past the plan's newest message: channels with newer messages stay unread and come back as unseen, to show the user. Leaving and muting can't be undone from here: pass only items the user explicitly approved, each one on its own, never a whole list on a general OK. Stops at a CAPTCHA, a lock or a block."
     )]
     async fn cleanup_apply(&self, Parameters(a): Parameters<ApplyArgs>) -> Result<CallToolResult, McpError> {
         Ok(self

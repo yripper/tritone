@@ -5,14 +5,14 @@ use crate::config::Config;
 use crate::discord::DiscordApi;
 use crate::discord::fake::{Call, FakeDiscord};
 use crate::discord::gateway::GatewayEvent;
-use crate::discord::types::{Channel, DiscordError, ReadySnapshot};
+use crate::discord::types::{Channel, DiscordError, Message, ReadySnapshot};
 use crate::domain::clock::fake::{FakeTimer, SeqGaps};
 use crate::domain::live::{BufferPolicy, ConnState};
 use crate::domain::send_queue::{SendQueue, Step};
 use crate::mcp::state::AppState;
 use crate::secrets::fake::MemSecrets;
 use crate::store::Store;
-use crate::test_support::{guild, ready, text_channel, user};
+use crate::test_support::{guild, msg, ready, text_channel, user};
 
 const T0: i64 = 1_800_000_000_000;
 
@@ -76,8 +76,11 @@ async fn send_message_resolves_names_and_converts_mentions() {
     let named = |id: u64, g: u64, n: &str| Channel { name: Some(n.into()), ..text_channel(id, g) };
     let channels = vec![named(100, 10, "general"), named(101, 10, "help"), named(200, 20, "general")];
     let mut snap = ready(1, vec![guild(10), guild(20)], channels);
-    snap.users = vec![user(2)];
+    // U003 is a friend, never seen in G010: never converted there.
+    snap.users = vec![user(3)];
     let (s, api) = server_with(snap);
+    let seen = Message { guild_id: Some(Id(10)), ..msg(Id(5_000), 100, 2, "x") };
+    s.state.live.note_authors(&[seen]);
 
     // Two #general: the tool lists both and queues nothing.
     let r = s.send_message(Parameters(send_args("#general"))).await.unwrap();
@@ -86,9 +89,11 @@ async fn send_message_resolves_names_and_converts_mentions() {
     assert!(e.contains("G010 › #general (100)") && e.contains("G020 › #general (200)"), "{e}");
     assert!(s.state.queue.status(None).unwrap().jobs.is_empty(), "never a guess");
 
-    let args = SendArgs { text: "hi @U002, see #help".into(), ..send_args("G010/#help") };
+    let args = SendArgs { text: "hi @U002 and @U003, see #help".into(), ..send_args("G010/#help") };
     let r = s.send_message(Parameters(args)).await.unwrap();
     assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    let v: serde_json::Value = serde_json::from_str(&text(&r)).unwrap();
+    assert_eq!(v["final_text"], "hi <@2> and @U003, see #help", "the result shows what will go out");
     while !matches!(s.state.queue.step().await, Step::Idle | Step::NotReady) {}
     let sent: Vec<(Id, String)> = api
         .calls()
@@ -98,7 +103,7 @@ async fn send_message_resolves_names_and_converts_mentions() {
             _ => None,
         })
         .collect();
-    assert_eq!(sent, vec![(Id(101), "hi <@2>, see #help".to_string())]);
+    assert_eq!(sent, vec![(Id(101), "hi <@2> and @U003, see #help".to_string())]);
 }
 
 #[tokio::test]

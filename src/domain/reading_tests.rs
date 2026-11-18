@@ -1,7 +1,9 @@
 use super::*;
 use crate::discord::fake::Call;
 use crate::discord::gateway::GatewayEvent;
-use crate::discord::types::{Channel, ChannelKind, Id, Message, MuteUntil, ReadySnapshot, UserRef};
+use crate::discord::types::{
+    Channel, ChannelKind, Id, Message, MuteUntil, ReadySnapshot, SearchQuery, SearchScope, UserRef,
+};
 use crate::domain::test_world::{ME, NOW, unread, world};
 use crate::store::{TargetKind, WatchLevel};
 use crate::test_support::*;
@@ -229,4 +231,18 @@ fn find_user_lists_servers_seen_in() {
     let found = find_user(&w.ctx.live, "U003");
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].seen_in_servers, vec!["Rust Lang".to_string()]);
+}
+
+#[tokio::test]
+async fn rest_reads_record_guild_authors() {
+    let w = world(snap());
+    let asker = UserRef { display_name: Some("Kim".into()), ..user(5) };
+    w.fake.put_history(Id(101), vec![Message { author: asker.clone(), ..msg(at(1_000), 101, 5, "q") }]);
+    read_history(&w.ctx, Id(101), 50, None, true).await.unwrap();
+    assert_eq!(w.ctx.live.guild_people(Id(1)), vec![asker]);
+
+    let found = Message { guild_id: Some(Id(2)), ..msg(at(2_000), 111, 6, "hit") };
+    w.fake.search_index.lock().unwrap().push(found);
+    search(&w.ctx, SearchScope::Guild(Id(2)), &SearchQuery::default()).await.unwrap();
+    assert_eq!(w.ctx.live.guild_people(Id(2)).iter().map(|u| u.id).collect::<Vec<_>>(), vec![Id(6)]);
 }

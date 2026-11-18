@@ -90,16 +90,77 @@ fn render_unclosed_fence_is_plain_text() {
     assert_eq!(r.text, "``` @U002");
 }
 
+/// Notes `who` as an author seen in G001's C101.
+fn seen(l: &LiveState, who: UserRef) {
+    let n = who.id.0;
+    l.note_authors(&[Message { author: who, ..in_guild(id_at(NOW - n as i64), "x") }]);
+}
+
 #[test]
 fn outgoing_mentions_converted() {
     let l = world();
-    let g = Some(Id(1));
+    for who in [named(3, "Three"), named(4, "Sam"), named(5, "Sam")] {
+        seen(&l, who);
+    }
+    let c = Id(101);
     assert_eq!(
-        to_discord_mentions("hey @U003 and @three, cc @nobody. mail a@U003.com, @everyone, `@U003`, end @u003.", &l, g),
+        to_discord_mentions(
+            "hey @U003 and @three, cc @nobody. mail a@U003.com, @everyone, `@U003`, end @u003.",
+            &l,
+            c,
+            None
+        ),
         "hey <@3> and <@3>, cc @nobody. mail a@U003.com, @everyone, `@U003`, end <@3>."
     );
-    // Two users called Sam: left as typed.
-    assert_eq!(to_discord_mentions("@Sam hi", &l, g), "@Sam hi");
-    // In DMs only the DM's people count.
-    assert_eq!(to_discord_mentions("@U002 @U003", &l, None), "<@2> @U003");
+    // Two people called Sam here: left as typed, so is a username shared by none.
+    assert_eq!(to_discord_mentions("@Sam hi", &l, c, None), "@Sam hi");
+    // A username wins over another person's display name.
+    seen(&l, UserRef { username: "max".into(), ..user(6) });
+    seen(&l, named(8, "max"));
+    assert_eq!(to_discord_mentions("@max", &l, c, None), "<@6>");
+    // In a DM only the DM's people count.
+    assert_eq!(to_discord_mentions("@U002 @U003", &l, Id(201), None), "<@2> @U003");
+}
+
+#[test]
+fn only_known_sam_not_in_guild_stays_plain() {
+    let l = LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 });
+    let mut snap = ready(ME, vec![guild(1), guild(2)], vec![text_channel(101, 1), text_channel(102, 2)]);
+    // A friend called Sam, known from READY: not someone seen in G001.
+    snap.users = vec![named(9, "Sam")];
+    l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    assert_eq!(to_discord_mentions("@Sam try X", &l, Id(101), None), "@Sam try X");
+    assert_eq!(to_discord_mentions("@U009 try X", &l, Id(101), None), "@U009 try X", "not even by username");
+    // Seen in another server: still not this one.
+    l.note_authors(&[Message { author: named(9, "Sam"), guild_id: Some(Id(2)), ..msg(id_at(NOW), 102, 9, "x") }]);
+    assert_eq!(to_discord_mentions("@Sam try X", &l, Id(101), None), "@Sam try X");
+    // Seen here: now it is a mention.
+    l.note_authors(&[Message { author: named(9, "Sam"), ..in_guild(id_at(NOW), "x") }]);
+    assert_eq!(to_discord_mentions("@Sam try X", &l, Id(101), None), "<@9> try X");
+}
+
+#[test]
+fn url_at_handle_not_converted() {
+    let l = world();
+    seen(&l, UserRef { username: "rust".into(), ..user(6) });
+    let text = "see https://youtube.com/@rust, medium.com/@rust/post, x/@rust, a@rust, https://x.com/a,@rust \
+                (@rust), \"@rust\" and @rust";
+    assert_eq!(
+        to_discord_mentions(text, &l, Id(101), None),
+        "see https://youtube.com/@rust, medium.com/@rust/post, x/@rust, a@rust, https://x.com/a,@rust \
+         (<@6>), \"<@6>\" and <@6>"
+    );
+}
+
+#[test]
+fn reply_author_converts() {
+    let l = world();
+    // A friend called Sam (READY), and the Sam whose message is being answered.
+    let mut snap = ready(ME, vec![guild(1)], vec![text_channel(101, 1)]);
+    snap.users = vec![named(9, "Sam")];
+    l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    l.set_buffered([Id(101)].into());
+    let question = Message { author: named(4, "Sam"), ..in_guild(id_at(NOW - 5), "how do I X?") };
+    l.apply(GatewayEvent::MessageCreate(Box::new(question.clone())), NOW);
+    assert_eq!(to_discord_mentions("@Sam try Y", &l, Id(101), Some(question.id)), "<@4> try Y");
 }

@@ -82,6 +82,7 @@ pub struct UserMatch {
 pub async fn read_history(ctx: &Ctx, channel: Id, limit: u8, before: Option<Id>, peek: bool) -> Result<History> {
     let limit = limit.clamp(1, 100);
     let page = ctx.api.history(channel, before, None, limit).await?;
+    ctx.live.note_authors(&page);
     let newest = page.first().map(|m| m.id);
     let mut ack_error = None;
     if let Some(n) = newest.filter(|_| !peek && before.is_none()) {
@@ -115,6 +116,7 @@ pub struct SearchResult {
 /// Discord's own search, in one server or one channel (DMs included).
 pub async fn search(ctx: &Ctx, scope: SearchScope, query: &SearchQuery) -> Result<SearchResult> {
     let page = ctx.api.search(scope, query).await?;
+    ctx.live.note_authors(&page.messages);
     Ok(SearchResult {
         total: page.total,
         messages: page.messages.iter().map(|m| render_message(m, &ctx.live)).collect(),

@@ -21,6 +21,8 @@ const VIEW_CHANNEL: u64 = 1 << 10;
 const ADMINISTRATOR: u64 = 1 << 3;
 /// Live events are dropped for receivers that lag further than this.
 const EVENT_CAPACITY: usize = 1024;
+/// Authors kept per server by `note_authors`; past this, new ones are skipped.
+const MAX_SEEN_PER_GUILD: usize = 5_000;
 
 /// How many recent messages to keep per buffered channel, and for how long.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,6 +73,8 @@ struct Inner {
     users: HashMap<Id, UserRef>,
     buffered: HashSet<Id>,
     recent: HashMap<Id, VecDeque<Message>>,
+    /// Authors of REST pages per server (`note_authors`), in memory only.
+    seen_in_guild: HashMap<Id, HashMap<Id, UserRef>>,
 }
 
 pub struct LiveState {
@@ -93,6 +97,7 @@ impl LiveState {
             users: HashMap::new(),
             buffered: HashSet::new(),
             recent: HashMap::new(),
+            seen_in_guild: HashMap::new(),
         };
         LiveState { policy, inner: Mutex::new(inner), events: broadcast::channel(EVENT_CAPACITY).0 }
     }
@@ -275,6 +280,38 @@ impl LiveState {
             all.push(me.clone());
         }
         all
+    }
+
+    /// Records the authors of messages read over REST (history, search, the
+    /// mentions inbox) as people of their server: the message's guild, else
+    /// its channel's. Messages whose server isn't known are skipped.
+    pub fn note_authors(&self, msgs: &[Message]) {
+        let mut inner = self.lock();
+        for m in msgs {
+            let guild = m.guild_id.or_else(|| inner.channels.get(&m.channel_id).and_then(|c| c.guild_id));
+            let Some(g) = guild else { continue };
+            let people = inner.seen_in_guild.entry(g).or_default();
+            if people.len() >= MAX_SEEN_PER_GUILD && !people.contains_key(&m.author.id) {
+                continue;
+            }
+            people.insert(m.author.id, m.author.clone());
+            inner.users.insert(m.author.id, m.author.clone());
+        }
+    }
+
+    /// People known to be in a server: authors noted from its REST pages and
+    /// authors in its channels' buffers. Who an outgoing `@name` may reach.
+    pub fn guild_people(&self, guild: Id) -> Vec<UserRef> {
+        let inner = self.lock();
+        let mut people = inner.seen_in_guild.get(&guild).cloned().unwrap_or_default();
+        for (channel, msgs) in &inner.recent {
+            if inner.channels.get(channel).is_some_and(|c| c.guild_id == Some(guild)) {
+                for m in msgs {
+                    people.entry(m.author.id).or_insert_with(|| m.author.clone());
+                }
+            }
+        }
+        people.into_values().collect()
     }
 
     /// The newest message is past the last acked one. A channel with messages

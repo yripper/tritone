@@ -266,7 +266,7 @@ async fn mention_in_unknown_thread_still_pending() {
     assert_eq!(items[0].label, "G001 › (thread or unknown channel)");
 
     w.fake.mentions.lock().unwrap().extend(inbox);
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     assert_eq!(entries.len(), 2);
     let e = &entries[0];
     assert_eq!(e.messages.len(), 1);
@@ -295,7 +295,7 @@ async fn get_pending_does_not_ack() {
     let w = world(s);
     let dm_msgs: Vec<Message> = (0..25).map(|i| msg(at(8_000 - i * 100), 301, 2, "x")).collect();
     w.fake.put_history(Id(301), dm_msgs);
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     assert_eq!(entries.len(), 1);
     let e = &entries[0];
     assert_eq!(e.messages.len(), 20, "first 20 unread");
@@ -321,7 +321,7 @@ async fn get_pending_uses_the_mentions_inbox() {
     // One in the last 7 days, one older than the inbox window.
     w.fake.mentions.lock().unwrap().extend([mention_me(at(1_000), 101), mention_me(at(eight_days), 102)]);
     w.fake.put_history(Id(101), vec![mention_me(at(1_000), 101)]);
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].item.reason, Reason::Mention);
     assert!(w.fake.calls().contains(&Call::RecentMentions { limit: 100, before: None }));
@@ -338,7 +338,7 @@ async fn dm_without_read_state_pending_unless_last_is_mine() {
     w.fake.put_history(Id(302), vec![msg(at(3_000), 302, ME, "x"), msg(at(2_000), 302, 3, "x")]);
     // Without messages in hand, pending can't tell who wrote last: both are candidates.
     assert_eq!(pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap().len(), 2);
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     let ids: Vec<u64> = entries.iter().map(|e| e.item.channel.0).collect();
     assert_eq!(ids, vec![302], "D301's last message is mine: read");
     assert_eq!(entries[0].messages.len(), 2);
@@ -360,7 +360,7 @@ async fn dropped_dms_do_not_use_the_fetch_budget() {
     }
     w.fake.mentions.lock().unwrap().push(mention_me(at(5_000), 101));
     w.fake.put_history(Id(101), vec![mention_me(at(5_000), 101)]);
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     let ids: Vec<u64> = entries.iter().map(|e| e.item.channel.0).collect();
     assert_eq!(ids, vec![101], "every DM with my message last is read");
     assert_eq!(entries[0].messages.len(), 1, "the mention still got its messages");
@@ -377,11 +377,66 @@ async fn mention_entry_carries_the_ping() {
     w.fake.put_history(Id(101), old);
     w.fake.put_history(Id(101), vec![mention_me(at(1_000), 101)]);
     w.fake.mentions.lock().unwrap().push(mention_me(at(1_000), 101));
-    let entries = get_pending(&w.ctx).await.unwrap();
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
     let e = &entries[0];
     assert_eq!(e.item.reason, Reason::Mention);
     assert!(e.more_unread);
     assert!(e.messages.iter().all(|m| m.id != at(1_000).to_string()), "the oldest unread don't reach it");
     let pings: Vec<String> = e.pings.iter().map(|m| m.id.clone()).collect();
     assert_eq!(pings, vec![at(1_000).to_string()]);
+}
+
+const DAY: i64 = 86_400_000;
+
+fn inbox_pages(calls: &[Call]) -> Vec<Option<Id>> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::RecentMentions { before, .. } => Some(*before),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn old_direct_mention_in_muted_server_survives_a_full_inbox() {
+    let mut s = snap();
+    s.settings.push(guild_settings(MuteUntil::Forever, false));
+    unread(&mut s, 101, at(1_000), Some(at(5 * DAY)));
+    unread(&mut s, 102, at(4 * DAY), Some(at(5 * DAY)));
+    let w = world(s);
+    // 150 newer @everyone and role pings, then a 4-day-old direct mention.
+    let noise = (0..150).map(|i| Message {
+        mention_everyone: i % 2 == 0,
+        mention_roles: if i % 2 == 1 { vec![Id(9)] } else { vec![] },
+        ..from_u2(at(1_000 + i * 60_000), 101)
+    });
+    w.fake.mentions.lock().unwrap().extend(noise.chain([mention_me(at(4 * DAY), 102)]));
+    w.fake.put_history(Id(102), vec![mention_me(at(4 * DAY), 102)]);
+
+    let r = get_pending(&w.ctx).await.unwrap();
+    let got: Vec<(u64, Reason)> = r.pending.iter().map(|e| (e.item.channel.0, e.item.reason)).collect();
+    assert_eq!(got, vec![(102, Reason::Mention)]);
+    assert!(!r.truncated);
+    let pages = inbox_pages(&w.fake.calls());
+    assert_eq!(pages.len(), 2, "the second page is short: the inbox is done");
+    assert_eq!(pages[1], Some(at(1_000 + 99 * 60_000)), "paged by the oldest id seen");
+}
+
+#[tokio::test]
+async fn inbox_paging_stops_at_the_window_or_five_pages() {
+    // A page reaching past 7 days ends the paging.
+    let w = world(snap());
+    let msgs = (0..100).map(|i| Message { mention_everyone: true, ..from_u2(at(1_000 + i), 101) });
+    let old = (0..100).map(|i| Message { mention_everyone: true, ..from_u2(at(8 * DAY + i), 101) });
+    w.fake.mentions.lock().unwrap().extend(msgs.chain(old));
+    assert!(!get_pending(&w.ctx).await.unwrap().truncated);
+    assert_eq!(inbox_pages(&w.fake.calls()).len(), 2);
+
+    // Six full pages inside the window: five are read, and the result says so.
+    let w = world(snap());
+    let msgs = (0..600).map(|i| Message { mention_everyone: true, ..from_u2(at(1_000 + i), 101) });
+    w.fake.mentions.lock().unwrap().extend(msgs);
+    assert!(get_pending(&w.ctx).await.unwrap().truncated);
+    assert_eq!(inbox_pages(&w.fake.calls()).len(), 5);
 }

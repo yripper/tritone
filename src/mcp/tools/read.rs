@@ -125,10 +125,10 @@ impl TritoneServer {
     }
 
     #[tool(
-        description = "What's waiting on the user: unread DMs and group DMs, mentions and replies, full-watch channels and joined threads, each with its first unread messages (up to 20) and more_unread. Does not mark anything read."
+        description = "What's waiting on the user: unread DMs and group DMs, mentions and replies, full-watch channels and joined threads, each with its first unread messages (up to 20) and more_unread. truncated: the mentions inbox was too long to read whole. Does not mark anything read."
     )]
     async fn get_pending(&self) -> Result<CallToolResult, McpError> {
-        Ok(self.run(|ctx| async move { Ok(json!({ "pending": get_pending(&ctx).await? })) }).await)
+        Ok(self.run(|ctx| async move { get_pending(&ctx).await }).await)
     }
 
     #[tool(

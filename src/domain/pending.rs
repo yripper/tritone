@@ -56,6 +56,9 @@ const MAX_FETCH: usize = 15;
 const MAX_CALLS: usize = 30;
 /// Pinging messages shown per entry.
 const MAX_PINGS: usize = 5;
+/// Mentions inbox pages of 100 read by `get_pending`, at most.
+const MAX_INBOX_PAGES: usize = 5;
+const INBOX_PAGE: u8 = 100;
 
 /// The watch level that applies: an explicit level on the channel (for a
 /// thread, then on its parent), then on its server; otherwise a Discord mute
@@ -283,21 +286,50 @@ fn unlisted_pings(
     Ok(out)
 }
 
+/// What `get_pending` returns.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingReport {
+    pub pending: Vec<PendingEntry>,
+    /// The mentions inbox had more within its 7 days than `MAX_INBOX_PAGES`
+    /// pages: older mentions in Discord-muted channels may be missing.
+    pub truncated: bool,
+}
+
+/// The mentions inbox of the last 7 days, newest first, and whether the page
+/// cap stopped it. Role and @everyone pings share the inbox, so a direct
+/// mention can sit several pages down.
+async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
+    let since = now - MENTIONS_WINDOW_MS;
+    let (mut all, mut before) = (Vec::<Message>::new(), None);
+    for _ in 0..MAX_INBOX_PAGES {
+        let page = match ctx.api.recent_mentions(INBOX_PAGE, before).await {
+            Ok(p) => p,
+            Err(e) if e.halts() => return Err(e.into()),
+            // Read states and the buffer still work without (the rest of) the inbox.
+            Err(e) => {
+                tracing::warn!(kind = e.kind(), "recent mentions failed");
+                return Ok((all, false));
+            }
+        };
+        let full = page.len() == usize::from(INBOX_PAGE);
+        let past_window = page.iter().any(|m| m.timestamp_ms < since);
+        before = page.iter().map(|m| m.id).min();
+        all.extend(page.into_iter().filter(|m| m.timestamp_ms >= since));
+        if !full || past_window {
+            return Ok((all, false));
+        }
+    }
+    Ok((all, true))
+}
+
 /// `pending` plus the first unread messages of each entry and, for mentions
 /// and replies, the pinging messages already in hand. Never marks anything
 /// read.
-pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
+pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
     let now = ctx.timer.now_ms();
-    let mentions: Vec<Message> = match ctx.api.recent_mentions(100, None).await {
-        Ok(m) => m.into_iter().filter(|m| m.timestamp_ms >= now - MENTIONS_WINDOW_MS).collect(),
-        Err(e) if e.halts() => return Err(e.into()),
-        // Read states and the buffer still work without the inbox.
-        Err(e) => {
-            tracing::warn!(kind = e.kind(), "recent mentions failed");
-            vec![]
-        }
-    };
-    let Some(me) = ctx.live.me().map(|u| u.id) else { return Ok(vec![]) };
+    let (mentions, truncated) = inbox(ctx, now).await?;
+    ctx.live.note_authors(&mentions);
+    let Some(me) = ctx.live.me().map(|u| u.id) else { return Ok(PendingReport { pending: vec![], truncated }) };
     let (mut kept, mut calls) = (0, 0);
     let mut out = Vec::new();
     for item in pending(&ctx.live, &ctx.store, &mentions, now)? {
@@ -332,6 +364,7 @@ pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
                 continue;
             }
         };
+        ctx.live.note_authors(&page);
         // No read state at all (a DM never opened here or elsewhere): it's
         // unread only if the last message isn't the user's, as in Discord.
         if acked.is_none() && page.first().is_some_and(|m| m.author.id == me) {
@@ -352,7 +385,7 @@ pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
         let messages = keep.into_iter().rev().map(|m| render_message(m, &ctx.live)).collect();
         out.push(PendingEntry { item, messages, more_unread, pings, error: None });
     }
-    Ok(out)
+    Ok(PendingReport { pending: out, truncated })
 }
 
 /// The newest pinging messages in hand that `shown` doesn't include, oldest first.

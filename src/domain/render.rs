@@ -169,14 +169,23 @@ fn role_label(id: Id, live: &LiveState, guild: Option<Id>) -> String {
     }
 }
 
-/// Turns `@name` into `<@id>` when exactly one person matches the username or
-/// display name (case-insensitive): any known user in a server, the DM
-/// people when `guild` is `None`. Ambiguous or unknown names, `@everyone`,
-/// `@here`, e-mail addresses and code stay as written.
-pub fn to_discord_mentions(text: &str, live: &LiveState, guild: Option<Id>) -> String {
-    let people: Vec<UserRef> = match guild {
-        Some(_) => live.users(),
-        None => live.channels().into_iter().filter(|c| c.kind.is_private()).flat_map(|c| c.recipients).collect(),
+/// Turns `@name` into `<@id>` only when it can't reach the wrong person.
+/// Candidates: in a DM or group DM, its recipients; in a server, the people
+/// seen there (`LiveState::guild_people`) plus the author of the message
+/// replied to. A username matches exactly (any case); a display name only
+/// when one candidate has it. Anything else, `@everyone`, `@here`, code, and
+/// an `@` that doesn't start a word (`a@b`, `x.com/@name`, a URL) stay as
+/// typed.
+pub fn to_discord_mentions(text: &str, live: &LiveState, channel: Id, reply_to: Option<Id>) -> String {
+    let Some(c) = live.channel(channel) else { return text.to_string() };
+    let people: Vec<UserRef> = match c.guild_id {
+        None => c.recipients,
+        Some(g) => {
+            let mut people = live.guild_people(g);
+            let replied = reply_to.and_then(|r| live.recent(channel).into_iter().find(|m| m.id == r));
+            people.extend(replied.map(|m| m.author));
+            people
+        }
     };
     map_outside_code(text, |s| replace_names(s, &people))
 }
@@ -185,18 +194,27 @@ fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_' || c == '.'
 }
 
+/// An `@` starts a mention only at the start, after whitespace or after
+/// opening or separating punctuation, and never inside a URL.
+fn may_start_mention(prev: Option<char>, written: &str) -> bool {
+    let after_ok = prev.is_none_or(|p| p.is_whitespace() || "([{,;:!?\"'*~".contains(p));
+    let word = written.rsplit(char::is_whitespace).next().unwrap_or_default();
+    after_ok && !word.contains("://")
+}
+
 fn replace_names(s: &str, people: &[UserRef]) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev: Option<char> = None;
     let mut rest = s;
     while let Some(c) = rest.chars().next() {
-        let starts_mention = c == '@' && !prev.is_some_and(|p| p.is_alphanumeric() || p == '<' || p == '_');
-        if starts_mention {
+        if c == '@' && may_start_mention(prev, &out) {
             let after = &rest[1..];
             let len = after.find(|ch: char| !is_name_char(ch)).unwrap_or(after.len());
             // A trailing period ends the sentence, not the name.
             let name = after[..len].trim_end_matches('.');
-            if let Some(id) = unique_match(name, people) {
+            // `@scope/pkg` and `@a@b` are not people.
+            let path_like = after[name.len()..].starts_with(['/', '@']);
+            if let Some(id) = unique_match(name, people).filter(|_| !path_like) {
                 out.push_str(&format!("<@{id}>"));
                 rest = &after[name.len()..];
                 prev = Some('>');
@@ -210,20 +228,23 @@ fn replace_names(s: &str, people: &[UserRef]) -> String {
     out
 }
 
+/// One person by exact username, else one by display name.
 fn unique_match(name: &str, people: &[UserRef]) -> Option<Id> {
     if name.is_empty() || name.eq_ignore_ascii_case("everyone") || name.eq_ignore_ascii_case("here") {
         return None;
     }
-    let mut ids: Vec<Id> = people
-        .iter()
-        .filter(|u| {
-            u.username.eq_ignore_ascii_case(name)
-                || u.display_name.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(name))
-        })
-        .map(|u| u.id)
-        .collect();
-    ids.sort();
-    ids.dedup();
+    let only = |pred: &dyn Fn(&UserRef) -> bool| {
+        let mut ids: Vec<Id> = people.iter().filter(|u| pred(u)).map(|u| u.id).collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    let by_username = only(&|u| u.username.eq_ignore_ascii_case(name));
+    let ids = if by_username.is_empty() {
+        only(&|u| u.display_name.as_deref().is_some_and(|d| d.eq_ignore_ascii_case(name)))
+    } else {
+        by_username
+    };
     match ids.as_slice() {
         [one] => Some(*one),
         _ => None,

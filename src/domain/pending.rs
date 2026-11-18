@@ -297,13 +297,14 @@ fn unlisted_pings(
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingReport {
     pub pending: Vec<PendingEntry>,
-    /// The mentions inbox had more within its 7 days than `MAX_INBOX_PAGES`
-    /// pages: older mentions in Discord-muted channels may be missing.
+    /// The mentions inbox wasn't read whole for its 7 days (more than
+    /// `MAX_INBOX_PAGES` pages, or a page failed): older mentions in
+    /// Discord-muted channels may be missing.
     pub truncated: bool,
 }
 
 /// The mentions inbox of the last 7 days, newest first, and whether the page
-/// cap stopped it. Role and @everyone pings share the inbox, so a direct
+/// cap or a failed page stopped it. Role and @everyone pings share the inbox, so a direct
 /// mention can sit several pages down.
 async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
     let since = now - MENTIONS_WINDOW_MS;
@@ -312,10 +313,11 @@ async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
         let page = match ctx.api.recent_mentions(INBOX_PAGE, before).await {
             Ok(p) => p,
             Err(e) if e.halts() => return Err(e.into()),
-            // Read states and the buffer still work without (the rest of) the inbox.
+            // Read states and the buffer still work without (the rest of) the
+            // inbox, but the 7 days weren't read whole: say so.
             Err(e) => {
                 tracing::warn!(kind = e.kind(), "recent mentions failed");
-                return Ok((all, false));
+                return Ok((all, true));
             }
         };
         let full = page.len() == usize::from(INBOX_PAGE);

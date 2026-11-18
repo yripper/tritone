@@ -440,3 +440,18 @@ async fn inbox_paging_stops_at_the_window_or_five_pages() {
     assert!(get_pending(&w.ctx).await.unwrap().truncated);
     assert_eq!(inbox_pages(&w.fake.calls()).len(), 5);
 }
+
+#[tokio::test]
+async fn failed_later_inbox_page_is_truncated() {
+    use crate::domain::clock::fake::FakeTimer;
+    use crate::domain::test_api::Api;
+    let mut w = world(snap());
+    let api = std::sync::Arc::new(Api::new(std::sync::Arc::new(FakeTimer::at(NOW))));
+    w.ctx.api = api.clone();
+    let msgs = (0..150).map(|i| Message { mention_everyone: true, ..from_u2(at(1_000 + i), 101) });
+    api.inner.mentions.lock().unwrap().extend(msgs);
+    api.fail_on_nth("recent_mentions", 2, crate::discord::types::DiscordError::RateLimited { retry_after_s: 5 });
+    let r = get_pending(&w.ctx).await.unwrap();
+    assert!(r.truncated, "the second page failed: the 7 days weren't read whole");
+    assert_eq!(inbox_pages(&api.calls()).len(), 2);
+}

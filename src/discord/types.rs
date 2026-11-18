@@ -258,11 +258,11 @@ pub struct ReadySnapshot {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum DiscordError {
     #[error(
-        "the Discord session is not valid (never logged in, or logged out elsewhere): ask the user to run `tritone login` in a terminal, then try again"
+        "the Discord session is not valid (never logged in, or logged out elsewhere): ask the user to run `tritone login` in a terminal"
     )]
     NeedsLogin,
     #[error(
-        "Discord asked for a CAPTCHA: open Discord in the official app, do any pending check there, then restart tritone (`pm2 restart tritone`). tritone stopped and will not retry"
+        "Discord asked for a CAPTCHA: tritone stopped and will not retry. The user must do the check in the official app (Discord desktop, web or mobile), then ask Claude to run `resume_queue`"
     )]
     Captcha,
     #[error(

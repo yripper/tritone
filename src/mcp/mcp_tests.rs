@@ -17,9 +17,16 @@ use crate::store::Store;
 fn test_state() -> AppState {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let timer = Arc::new(FakeTimer::at(1_000_000));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(SeqGaps::new(&[0]))));
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 200, max_age_ms: 86_400_000 }));
-    AppState::new(store, Arc::new(MemSecrets::default()), live, queue, Arc::new(Config::default()), timer)
+    let config = Arc::new(Config::default());
+    let queue = Arc::new(SendQueue::new(
+        store.clone(),
+        live.clone(),
+        config.clone(),
+        timer.clone(),
+        Arc::new(SeqGaps::new(&[0])),
+    ));
+    AppState::new(store, Arc::new(MemSecrets::default()), live, queue, config, timer)
 }
 
 /// Calls one tool over HTTP, through the guard, and returns the tool's JSON output.
@@ -133,6 +140,16 @@ async fn status_wakes_the_gateway_after_a_new_login() {
     assert!(s["note"].as_str().unwrap().contains("reconnecting"));
     // notify_one stores a permit, so this returns at once.
     tokio::time::timeout(std::time::Duration::from_secs(1), state.login_notify.notified()).await.unwrap();
+}
+
+#[tokio::test]
+async fn status_accepting_a_login_drops_the_old_client() {
+    let state = test_state();
+    state.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
+    state.live.reject_token("tok-old");
+    state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok-new").await.unwrap();
+    assert_eq!(call_tool(state.clone(), "status").await["connection"], "connecting");
+    assert!(state.api.read().unwrap().is_none(), "the dead token's client is gone");
 }
 
 #[tokio::test]

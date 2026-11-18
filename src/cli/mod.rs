@@ -1,6 +1,7 @@
 //! Command line: `start` (daemon), `login`, `logout`, `status`, `token`.
 
 pub mod daemon;
+pub mod login;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -61,10 +62,8 @@ async fn status() -> Result<()> {
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Start => daemon::start().await,
-        Command::Login { .. } | Command::Logout => {
-            println!("not implemented yet");
-            Ok(())
-        }
+        Command::Login { token } => login::login(token).await,
+        Command::Logout => login::logout().await,
         Command::Status => status().await,
         Command::Token => {
             println!("{}", daemon::ensure_bearer_token(keychain()?.as_ref()).await?);

@@ -13,9 +13,10 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `src/discord/fingerprint.rs`: `Fingerprint` (super-properties, REST and WebSocket headers), the build-number scrape, the installation id.
 - `src/discord/transport.rs`: `http_client` (wreq + Chrome emulation + cookie jar), `ws_connect`, `CookieJar`, `ChromeIdentity`.
 - `src/discord/http.rs`: `HttpDiscord`, the real `DiscordApi` (REST over the wreq client), and `rebuild_api`.
+- `src/discord/login.rs`: the remote-auth QR login and `validate_pasted`.
 - `src/discord/rate.rs`: `Pacer` (one request in flight, gaps, 429 cooldown).
 - `src/discord/parse.rs`: Discord JSON to the model (`parse_message`, `parse_user`, `parse_channel`), shared by REST and the gateway.
-- Tests: `src/discord/http_tests.rs` (wiremock), `src/discord/parse_tests.rs`, `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
+- Tests: `src/discord/http_tests.rs` (wiremock), `src/discord/login_tests.rs` (a local remote-auth WebSocket server plus wiremock), `src/discord/parse_tests.rs`, `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
 
 ## Public surface
 - `Id(pub u64)` (`src/discord/types.rs:16`): `Copy + Eq + Hash + Ord + Default`. Serde writes a decimal string and reads a string or a number; `Display`/`FromStr`; `JsonSchema` (a digit string), so tool arguments can take it.
@@ -28,35 +29,46 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `GuildSettings` (`src/discord/types.rs:209`): `guild_id: None` holds the DM settings; `channel_mutes` holds every channel override, including `No` (explicit unmute).
 - `Message` (`src/discord/types.rs:218`): attachments are placeholders (`"image: a.png"`), embeds are titles, reactions are `(":name:" or emoji, count)`.
 - `DiscordError` (`src/discord/types.rs:259`): `NeedsLogin`, `Captcha`, `Locked`, `Blocked`, `RateLimited`, `Indexing`, `Forbidden`, `NotFound`, `Api { status, code }`, `Http`. Display says what the user must do. `halts()` (`src/discord/types.rs:292`) is true for `NeedsLogin | Captcha | Locked | Blocked`: nothing retries those. `kind()` (`src/discord/types.rs:300`) is log-safe.
-- `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`.
+- `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`, and `clear_halt()` (`src/discord/api.rs:35`), a sync default no-op: a client with its own sticky halt overrides it; only `SendQueue::resume` calls it, on the user's explicit OK.
 - `GatewayEvent` (`src/discord/gateway/events.rs:6`): `Ready`, `Resumed`, `MessageCreate`, `MessageAck`, `ChannelUpsert`, `ChannelDelete`, `GuildUpsert(guild, channels)` (GUILD_CREATE), `GuildUpdate(guild)` (GUILD_UPDATE: keeps channels and my roles), `MyRolesUpdate { guild, roles }` (GUILD_MEMBER_UPDATE for self), `RoleUpsert { guild, role }` / `RoleDelete { guild, role }` (GUILD_ROLE_*), `GuildDelete`, `SettingsUpdate`, `Disconnected`, `Halted`. On close 4004 the gateway calls `LiveState::reject_token` rather than sending `Halted(NeedsLogin)`, so the dead token is remembered.
 
 ## HttpDiscord (`src/discord/http.rs`)
 - `HttpDiscord::new(base, token, fp, client, live)` (`src/discord/http.rs:124`): `base` is the API root (`API_BASE` = `https://discord.com/api/v9`, `src/discord/http.rs:32`; wiremock in tests). `live` is the halt sink.
-- Every request: `Fingerprint::rest_headers(write)` with `Authorization: <token>` (no prefix), `Content-Type: application/json` when there's a body, and any request header (`X-Context-Properties`) inserted after `Sec-Ch-Ua-Platform` (`headers`, `src/discord/http.rs:171`). Path segments are percent-encoded one by one (`url::Url::path_segments_mut`).
-- `call` (`src/discord/http.rs:183`), in order: the halt slot (set → return that error, no request); the `Pacer` turn (held for the whole request, retry included); send; `classify` (`src/discord/http.rs:267`):
+- Every request: `Fingerprint::rest_headers(write)` with `Authorization: <token>` (no prefix), `Content-Type: application/json` when there's a body, and any request header (`X-Context-Properties`) inserted after `Sec-Ch-Ua-Platform` (`headers`, `src/discord/http.rs:177`). Path segments are percent-encoded one by one (`url::Url::path_segments_mut`).
+- `call` (`src/discord/http.rs:189`), in order: `stopped()` (`src/discord/http.rs:136`: this client's halt slot, else `LiveState`'s halt, so a gateway 4004 or CAPTCHA also stops REST; set → return that error, no request); the `Pacer` turn (held for the whole request, retry included); `stopped()` again, because calls queued behind a request that just halted must not go out; send; `classify` (`src/discord/http.rs:277`):
   - 2xx → ok (202 kept for `search`);
   - JSON `code` 40002/40004 → `Locked`; 40333 → `Blocked`;
-  - 400 with `captcha_key` → `Captcha`; 401 → `NeedsLogin`;
+  - 400 with `captcha_key` → `Captcha`; 401 with code 60003 (the action needs MFA) → `Locked`, keeping the token; any other 401 → `NeedsLogin`;
   - 403/429 whose body isn't JSON (Cloudflare HTML or text) → `Blocked`; JSON 403 → `Forbidden`; 404 → `NotFound`;
   - 429 with `retry_after` (body, else the `Retry-After` header) → the client cools down that long; a GET is retried once when the wait is ≤ 10 s (`MAX_GET_RETRY_WAIT`), otherwise `RateLimited`. Writes are never retried. 429 without any wait → `Blocked` (never retry blind).
   - `Blocked.retry_after_s` is the `Retry-After` header, at least 60.
   - https://docs.discord.food/topics/rate-limits, https://docs.discord.food/topics/captcha-handling
-- Halts (`set_halt`, `src/discord/http.rs:139`): any error with `halts()` is stored (first wins) and reported: `NeedsLogin` → `live.reject_token(token)`, others → `live.halt(e)`. Logs carry the kind only.
+- Halts (`set_halt`, `src/discord/http.rs:145`): any error with `halts()` is stored (first wins) and reported: `NeedsLogin` → `live.reject_token(token)`, others → `live.halt(e)`. Logs carry the kind only.
 - Endpoints (https://docs.discord.food/resources/message, /resources/channel, /topics/read-state, /resources/user-settings):
   - `history`/`around`: `GET /channels/{c}/messages?limit=1..100` with `before`, else `after`, or `around`.
   - `recent_mentions`: `GET /users/@me/mentions?limit&roles=true&everyone=true[&before]`.
-  - `search` (`src/discord/http.rs:363`): `GET /guilds/{g}/messages/search` or `/channels/{c}/messages/search` with `content`, `author_id`, `channel_id`, `min_id`, `max_id`, `offset` (when > 0). Each result group yields its `hit:true` message (else the first). 202 → `Indexing` (`retry_after` 0 → 5 s).
+  - `search` (`src/discord/http.rs:376`): `GET /guilds/{g}/messages/search` or `/channels/{c}/messages/search` with `content`, `author_id`, `channel_id`, `min_id`, `max_id`, `offset` (when > 0). Each result group yields its `hit:true` message (else the first). 202 → `Indexing` (`retry_after` 0 → 5 s).
   - `ack`: `POST /channels/{c}/messages/{m}/ack` `{"token":null,"last_viewed":<days since 2015-01-01>}`. `ack_bulk`: `POST /read-states/ack-bulk` `{read_states:[{read_state_type:0,channel_id,message_id}]}`, chunked by 100; empty → no request.
   - `typing`: `POST /channels/{c}/typing`.
-  - `send` (`src/discord/http.rs:416`): `{content, nonce, tts:false, flags: 0|4096 (silent), mobile_network_type:"unknown", message_reference?: {message_id, channel_id, guild_id? (from LiveState), fail_if_not_exists:false}}` in that order, header `X-Context-Properties` = base64 `{"location":"chat_input"}`.
+  - `send` (`src/discord/http.rs:429`): `{content, nonce, tts:false, flags: 0|4096 (silent), mobile_network_type:"unknown", message_reference?: {message_id, channel_id, guild_id? (from LiveState), fail_if_not_exists:false}}` in that order, header `X-Context-Properties` = base64 `{"location":"chat_input"}`.
   - `react`: `PUT .../reactions/{emoji}/@me`; `<:name:id>`/`<a:name:id>`/`:name:id` → `name:id`, unicode is percent-encoded.
   - `create_thread`: `POST /channels/{c}/messages/{m}/threads {name, auto_archive_duration:1440}` or `POST /channels/{c}/threads {name, type:11, auto_archive_duration:1440}`.
-  - `create_forum_post` (`src/discord/http.rs:470`): `POST /channels/{forum}/threads {name, applied_tags:[], message:{content}}`; the answer's `message` is the first post. The nonce is not sent: the forum message object has no nonce field.
+  - `create_forum_post` (`src/discord/http.rs:483`): `POST /channels/{forum}/threads {name, applied_tags:[], message:{content}}`; the answer's `message` is the first post. The nonce is not sent: the forum message object has no nonce field.
   - `leave_guild`: `DELETE /users/@me/guilds/{g}` `{lurking:false}`.
-  - `set_mute` (`src/discord/http.rs:485`): `PATCH /users/@me/guilds/{g|@me}/settings`; guild `{muted, mute_config}`, channel `{channel_overrides:{"<c>":{muted, mute_config}}}` (a map here, an array in READY). `mute_config` is `{end_time:null, selected_time_window:-1}` when muting, `null` when unmuting.
-  - `user` (`src/discord/http.rs:499`): `GET /users/{u}/profile?with_mutual_guilds=false`, reads `.user`.
-- `rebuild_api(jar, secrets, fp, live, token)` (`src/discord/http.rs:511`): `jar.reload(secrets)`, a fresh `http_client(jar)`, an `HttpDiscord` on `API_BASE`. Returns the API and the client (the gateway's WebSocket uses the same client). The daemon calls it on the first connect and whenever a new login wakes it.
+  - `set_mute` (`src/discord/http.rs:498`): `PATCH /users/@me/guilds/{g|@me}/settings`; guild `{muted, mute_config}`, channel `{channel_overrides:{"<c>":{muted, mute_config}}}` (a map here, an array in READY). `mute_config` is `{end_time:null, selected_time_window:-1}` when muting, `null` when unmuting.
+  - `user` (`src/discord/http.rs:512`): `GET /users/{u}/profile?with_mutual_guilds=false`, reads `.user`.
+- `rebuild_api(jar, secrets, fp, live, token)` (`src/discord/http.rs:524`): `jar.reload(secrets)`, a fresh `http_client(jar)`, an `HttpDiscord` on `API_BASE`. Returns the API and the client (the gateway's WebSocket uses the same client). The daemon calls it on the first connect and whenever a new login wakes it.
+
+## Login (`src/discord/login.rs`)
+Remote-auth v2, https://docs.discord.food/remote-authentication/desktop.
+- `qr_login(client, fp, show)` (`src/discord/login.rs:71`) → the token. `qr_login_with(.., &LoginEndpoints, KeySource)` (`src/discord/login.rs:80`) takes the endpoints (`REMOTE_AUTH_URL` = `wss://remote-auth-gateway.discord.gg/?v=2`, the API root) and the RSA key source, so tests use local servers and one cached key.
+- Before the socket: unauthenticated `GET {api}/experiments` with `rest_headers(false)`; its `fingerprint` becomes `X-Fingerprint` on the ticket exchange (`fetch_x_fingerprint`, `src/discord/login.rs:115`; https://docs.discord.food/authentication#fingerprints). A failure is tolerated.
+- One session (`session`, `src/discord/login.rs:145`): a fresh RSA-2048 key; `ws_connect` with `fp.ws_headers()` (carries `Origin: https://discord.com`, which the gateway requires); `hello` → heartbeat every `heartbeat_interval` and `init {encoded_public_key: base64(SPKI DER)}`; `nonce_proof {encrypted_nonce}` → OAEP-SHA256 decrypt → `{op:"nonce_proof", nonce: base64url-no-pad}` (`nonce_proof`, `src/discord/login.rs:134`); `pending_remote_init {fingerprint}` must equal base64url-no-pad SHA-256 of our SPKI, else the socket closes and the login fails without showing a QR; then `show("https://discord.com/ra/<fingerprint>")`; `pending_ticket` is only logged as "scanned" (its payload is never decrypted); `pending_login {ticket}` ends the session; `cancel` → `Cancelled`.
+- Close 4003 (expired), a missed heartbeat ack, or `timeout_ms` + 10 s without a ticket → a new session with a new key, 1 s later, up to 3 times (`REGENERATIONS`), then `Expired`. Any other close code → `Protocol`.
+- Ticket exchange (`exchange_ticket`, `src/discord/login.rs:243`): `POST {api}/users/@me/remote-auth/login {"ticket"}`, no `Authorization`, `rest_headers(true)` plus `Content-Type` and `X-Fingerprint`, same client (same cookies). A body with `captcha_key` → `Captcha` (never solved or retried); other non-2xx → `Http`; `encrypted_token` → OAEP-SHA256 decrypt → the token.
+- `LoginError` (`src/discord/login.rs:33`): `Captcha`, `Cancelled`, `Expired`, `InvalidToken(reason)`, `Protocol`, `Http`.
+- `validate_pasted(raw)` (`src/discord/login.rs:288`): trims whitespace and one pair of `"` or `'`; 16..=2048 bytes; no `Bot `/`Bearer ` prefix; graphic ASCII without quotes (rules as Serein's `crates/client-core/src/auth.rs`).
+- Never logged: the ticket, the token, the user payload.
 
 ## Pacer (`src/discord/rate.rs`)
 - `Pacer::turn(write)` (`src/discord/rate.rs:50`): one turn at a time (a tokio mutex held for the request). Waits until 250 ms (`MIN_GAP`) after the last request ended, and 500 ms (`WRITE_GAP`) after the last write. During a cooldown it returns `Err(seconds left)` at once and the caller answers `RateLimited` without a request.
@@ -100,11 +112,11 @@ Identity: Discord web in Chrome. Fields: `user_agent`, `browser_version`, `os`, 
 - `FakeDiscord::default()` posts as `Id(1)` / `U001`.
 
 ## Dependencies
-serde, serde_json (`preserve_order`), schemars, thiserror, async-trait, wreq 0.16.3, wreq-util 0.2.1, tokio-tungstenite 0.30, cookie_store 0.22, url, base64, sys-locale, iana-time-zone. Building wreq compiles BoringSSL: cmake, a C/C++ compiler and libclang (see README).
+rsa 0.9 (OAEP-SHA256, `rsa::rand_core::OsRng`), sha2, futures-util, serde, serde_json (`preserve_order`), schemars, thiserror, async-trait, wreq 0.16.3, wreq-util 0.2.1, tokio-tungstenite 0.30, cookie_store 0.22, url, base64, sys-locale, iana-time-zone. Building wreq compiles BoringSSL: cmake, a C/C++ compiler and libclang (see README).
 
 ## Gotchas & invariants
 - Never log tokens, cookies or message text from here. `HttpDiscord` network errors are reduced to "timed out" / "could not connect" / "request failed" (wreq's text names the URL).
-- A halt in `HttpDiscord` is permanent for that instance: a new login builds a new one (`rebuild_api`). Tests assert the halted call count stays at one request.
+- A halt in `HttpDiscord` lasts until the user clears it: `clear_halt()` (`src/discord/http.rs:522`, the `DiscordApi` override `SendQueue::resume` calls together with `LiveState::clear_halt`) lifts a `Captcha`, `Locked` or `Blocked` halt, never `NeedsLogin`; a dead token needs a new login, which builds a new client (`rebuild_api`). Tests assert the halted call count stays at one request, including a send already waiting for its turn when the read before it halted.
 - Header order for `Authorization`/`Content-Type` within Chrome's set is a best guess; compare with a browser capture on the first live run.
 - `refresh` is the only code here that reaches discord.com without a token: the two unauthenticated GETs above. Tests never touch the network: they point `Endpoints` at wiremock.
 - `GuildUpsert` replaces the guild's whole channel set: the gateway must include the guild's joined threads in `channels`, or they're dropped. Use it for GUILD_CREATE only; GUILD_UPDATE is `GuildUpdate`.

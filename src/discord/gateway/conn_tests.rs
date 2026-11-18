@@ -220,13 +220,20 @@ impl Drop for Harness {
 async fn harness(token: Option<&str>) -> Harness {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let timer = Arc::new(FakeTimer::at(T));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(SeqGaps::new(&[0]))));
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 * 365 * 10 }));
+    let config = Arc::new(Config::default());
+    let queue = Arc::new(SendQueue::new(
+        store.clone(),
+        live.clone(),
+        config.clone(),
+        timer.clone(),
+        Arc::new(SeqGaps::new(&[0])),
+    ));
     let secrets = Arc::new(MemSecrets::default());
     if let Some(t) = token {
         secrets.set(ACCOUNT_TOKEN, t).await.unwrap();
     }
-    let state = AppState::new(store, secrets, live, queue, Arc::new(Config::default()), timer);
+    let state = AppState::new(store, secrets, live, queue, config, timer);
     let server = Server::start().await;
     let opener = Arc::new(FakeOpener::default());
     let fp = Arc::new(Fingerprint::for_this_machine());

@@ -7,10 +7,15 @@ use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::Response;
+use axum::routing::post;
 use rmcp::transport::streamable_http_server::session::never::NeverSessionManager;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 
 use super::server::TritoneServer;
+use super::state::AppState;
+use crate::discord::types::DiscordError;
+use crate::domain::live::ConnState;
+use crate::secrets::ACCOUNT_TOKEN;
 
 #[derive(Clone)]
 struct Guard {
@@ -46,12 +51,49 @@ pub fn guard_router(router: Router, port: u16, token: String) -> Router {
     router.layer(middleware::from_fn_with_state(g, guard))
 }
 
-/// The guarded MCP endpoint at `/mcp`.
+/// The guarded MCP endpoint at `/mcp`, and `POST /login-notify` for `tritone login`.
 pub fn app(server: TritoneServer, port: u16, token: String) -> Router {
+    let notify = Router::new().route("/login-notify", post(login_notify)).with_state(server.state.clone());
     // Stateless: no session state can leak between Claude clients.
     let cfg = StreamableHttpServerConfig::default().with_legacy_session_mode(false).with_json_response(true);
     let svc = StreamableHttpService::new(move || Ok(server.clone()), Arc::new(NeverSessionManager::default()), cfg);
-    guard_router(Router::new().nest_service("/mcp", svc), port, token)
+    guard_router(Router::new().nest_service("/mcp", svc).merge(notify), port, token)
+}
+
+/// `tritone login` calls this after saving a token, so the new login takes
+/// effect even if nobody polls `status`. Same rule as `status`: only while
+/// halted on `NeedsLogin`, and only for a token Discord hasn't rejected (nor
+/// been tried since the halt), so it can't lift a CAPTCHA or block halt, wake
+/// a healthy connection, or drive an identify loop.
+async fn login_notify(State(state): State<AppState>) -> (StatusCode, String) {
+    match state.live.connection() {
+        ConnState::Halted(DiscordError::NeedsLogin) => {}
+        ConnState::Halted(e) => {
+            let text = format!(
+                "tritone is stopped for another reason ({e}). Restart it (`pm2 restart tritone`) once that's sorted; it will use the new login"
+            );
+            return (StatusCode::CONFLICT, text);
+        }
+        _ => {
+            let text = "tritone is connected with the previous login: restart it (`pm2 restart tritone`) to switch";
+            return (StatusCode::CONFLICT, text.to_string());
+        }
+    }
+    match state.secrets.get(ACCOUNT_TOKEN).await {
+        Ok(Some(token)) if state.accept_login(&token) => {
+            tracing::info!("new login; reconnecting");
+            (StatusCode::OK, "tritone is reconnecting with the new login".into())
+        }
+        Ok(Some(_)) => (
+            StatusCode::CONFLICT,
+            "tritone already tried this login (or Discord rejected it): run `tritone login` again".into(),
+        ),
+        Ok(None) => (StatusCode::CONFLICT, "there's no Discord login in the keyring: run `tritone login`".into()),
+        Err(e) => {
+            tracing::warn!("reading the keyring failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "tritone could not read the keyring".into())
+        }
+    }
 }
 
 pub async fn serve(server: TritoneServer, listener: tokio::net::TcpListener, token: String) -> anyhow::Result<()> {

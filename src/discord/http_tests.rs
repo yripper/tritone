@@ -489,3 +489,88 @@ async fn rebuild_api_reloads_the_cookies_a_login_saved() {
     assert!(!daemon_jar.save_if_dirty(&secrets, 100_000).await.unwrap());
     assert_eq!(secrets.get(crate::secrets::ACCOUNT_COOKIES).await.unwrap(), saved);
 }
+
+#[tokio::test]
+async fn a_call_waiting_for_its_turn_does_not_go_out_after_a_halt() {
+    let env = env().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(400)
+                .set_delay(Duration::from_millis(300))
+                .set_body_json(json!({"captcha_key": ["captcha-required"]})),
+        )
+        .mount(&env.server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(message_json(1, 101)))
+        .mount(&env.server)
+        .await;
+    let msg = OutgoingMessage { content: "x".into(), reply_to: None, nonce: Id(1), silent: false };
+    let (read, sent) = tokio::join!(env.api.history(Id(101), None, None, 5), async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        env.api.send(Id(101), &msg).await
+    });
+    assert_eq!(read, Err(DiscordError::Captcha));
+    assert_eq!(sent.map(|m| m.id), Err(DiscordError::Captcha));
+    assert_eq!(received(&env).await.len(), 1, "the queued send never reached Discord");
+}
+
+#[tokio::test]
+async fn a_halt_in_live_stops_rest_calls() {
+    let env = env().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&env.server)
+        .await;
+    env.live.halt(DiscordError::Captcha);
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::Captcha));
+    env.live.reject_token(TOKEN);
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
+    assert!(received(&env).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_401_asking_for_mfa_is_locked_and_keeps_the_token() {
+    let env = env().await;
+    Mock::given(method("DELETE"))
+        .respond_with(
+            ResponseTemplate::new(401).set_body_json(json!({"message": "Two factor is required", "code": 60003})),
+        )
+        .mount(&env.server)
+        .await;
+    assert_eq!(env.api.leave_guild(Id(11)).await, Err(DiscordError::Locked));
+    assert_eq!(env.live.connection(), ConnState::Halted(DiscordError::Locked));
+    // The token wasn't marked dead.
+    assert!(env.live.try_login_with(TOKEN));
+}
+
+#[tokio::test]
+async fn clear_halt_lets_calls_through_again_after_a_captcha() {
+    let env = env().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({"captcha_key": ["captcha-required"]})))
+        .up_to_n_times(1)
+        .mount(&env.server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .mount(&env.server)
+        .await;
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::Captcha));
+    // The user's explicit OK clears both halts (SendQueue::resume does this).
+    env.live.clear_halt();
+    env.api.clear_halt();
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Ok(vec![]));
+    assert_eq!(received(&env).await.len(), 2, "the next call reached Discord");
+}
+
+#[tokio::test]
+async fn clear_halt_never_lifts_a_dead_token() {
+    let env = env().await;
+    Mock::given(method("GET")).respond_with(ResponseTemplate::new(401)).mount(&env.server).await;
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
+    env.live.clear_halt();
+    env.api.clear_halt();
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
+    assert_eq!(received(&env).await.len(), 1, "a rejected token stays halted until a new login rebuilds the client");
+}

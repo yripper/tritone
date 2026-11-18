@@ -252,6 +252,15 @@ async fn resume_refuses_after_the_gateway_closed_the_session() {
 }
 
 #[tokio::test]
+async fn resume_refuses_after_discord_kept_refusing_the_session() {
+    let r = rig(&[20_000]);
+    r.live.halt(DiscordError::SessionRefused);
+    let e = r.q.resume().unwrap_err();
+    assert!(e.to_string().contains("restart tritone"), "{e}");
+    assert_eq!(r.live.connection(), ConnState::Halted(DiscordError::SessionRefused));
+}
+
+#[tokio::test]
 async fn resume_after_captcha_clears_the_halt_and_continues() {
     let r = rig(&[20_000]);
     r.api.fail_on("send", DiscordError::Captcha);

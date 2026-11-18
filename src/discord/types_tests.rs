@@ -70,3 +70,11 @@ fn gateway_closed_halts_and_says_restart() {
     assert_eq!(e.kind(), "gateway_closed");
     assert_eq!(e.to_string(), "Discord closed the session (code 4011): restart tritone (pm2 restart tritone)");
 }
+
+#[test]
+fn session_refused_halts_and_says_restart() {
+    let e = DiscordError::SessionRefused;
+    assert!(e.halts());
+    assert_eq!(e.kind(), "session_refused");
+    assert_eq!(e.to_string(), "Discord keeps refusing the session: restart tritone (pm2 restart tritone)");
+}

@@ -43,6 +43,8 @@ const CLOSE_RESUMABLE: u16 = 4000;
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Resume attempts that never reach RESUMED before identifying fresh.
 const MAX_RESUME_ATTEMPTS: u32 = 3;
+/// Identifies in a row that end without READY before tritone stops.
+const MAX_UNREADY_IDENTIFIES: u32 = 3;
 
 /// Every wait the loop makes. Tests shrink them; production uses `default()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,7 +104,10 @@ struct Session {
 struct Gap {
     /// Highest message id seen per channel when the socket dropped.
     seen: HashMap<Id, Id>,
-    /// The drop's time as a snowflake: newer messages are expected gaps.
+    /// When the dead socket last delivered anything, as a snowflake: newer
+    /// messages are expected gaps. Not when the drop was noticed, which can
+    /// be much later (a zombie is only seen at the next heartbeat, and a
+    /// sleeping machine stretches that to the whole sleep).
     cutoff: Id,
 }
 
@@ -123,6 +128,10 @@ struct Ended {
     /// READY or RESUMED arrived on this connection.
     ready: bool,
     lasted: Duration,
+    /// This connection sent an identify (not a resume).
+    identified: bool,
+    /// Wall-clock ms of the last payload this socket delivered.
+    last_payload_ms: Option<i64>,
 }
 
 /// `min(cap, base << n)` plus jitter (`next` is the deterministic part;
@@ -285,25 +294,42 @@ impl Gateway {
         let mut seq: Option<u64> = None;
         let mut gap: Option<Gap> = None;
         let mut resume_attempts = 0;
+        let mut unready_identifies = 0;
         loop {
             let resuming = session.is_some();
-            let ended = self.connect_once(client, token, &mut session, &mut seq, &mut gap).await;
-            if ended.ready || !resuming {
+            let Ended { next, ready, lasted, identified, last_payload_ms } =
+                self.connect_once(client, token, &mut session, &mut seq, &mut gap).await;
+            if ready || !resuming {
                 resume_attempts = 0;
             } else {
                 resume_attempts += 1;
             }
-            if ended.ready && ended.lasted >= self.timing.stable_after {
+            if ready {
+                unready_identifies = 0;
+            } else if identified {
+                unready_identifies += 1;
+            }
+            if ready && lasted >= self.timing.stable_after {
                 backoff.reset();
             }
-            let wait = match ended.next {
+            // Each identify opens a session attempt: stop and surface instead
+            // of retrying every 30 s for as long as the daemon runs.
+            let next =
+                if unready_identifies >= MAX_UNREADY_IDENTIFIES && matches!(next, Next::Resume | Next::Identify(_)) {
+                    tracing::warn!(identifies = unready_identifies, "Discord keeps refusing the session; stopping");
+                    self.state.live.halt(DiscordError::SessionRefused);
+                    Next::Halt
+                } else {
+                    next
+                };
+            let wait = match next {
                 // The socket is gone: never leave the model looking ready, or
                 // lifting the halt (the queue's resume) would let writes through.
                 Next::Halt => {
                     self.apply(GatewayEvent::Disconnected);
                     return Next::Halt;
                 }
-                Next::NewToken(_) => return ended.next,
+                Next::NewToken(_) => return next,
                 Next::Resume if resume_attempts < MAX_RESUME_ATTEMPTS => backoff.delay(),
                 Next::Resume => {
                     tracing::info!(attempts = resume_attempts, "resume keeps failing; identifying fresh");
@@ -317,7 +343,7 @@ impl Gateway {
             };
             // From the first drop since READY/RESUMED; a fresh READY reads it.
             if gap.is_none() && !self.state.live.channels().is_empty() {
-                gap = Some(self.gap());
+                gap = Some(self.gap(last_payload_ms));
             }
             self.apply(GatewayEvent::Disconnected);
             let until = Instant::now() + wait;
@@ -334,9 +360,12 @@ impl Gateway {
         }
     }
 
-    fn gap(&self) -> Gap {
+    /// `last_payload_ms` is when the dead socket last delivered anything
+    /// (now, if it never did).
+    fn gap(&self, last_payload_ms: Option<i64>) -> Gap {
         let seen = self.state.live.channels().into_iter().filter_map(|c| Some((c.id, c.last_message_id?))).collect();
-        Gap { seen, cutoff: Id::from_timestamp_ms(self.state.timer.now_ms(), 0) }
+        let at = last_payload_ms.unwrap_or_else(|| self.state.timer.now_ms());
+        Gap { seen, cutoff: Id::from_timestamp_ms(at, 0) }
     }
 
     /// After a login notify: the keyring's token when it differs from the
@@ -362,7 +391,8 @@ impl Gateway {
         seq: &mut Option<u64>,
         gap: &mut Option<Gap>,
     ) -> Ended {
-        let ended = |next| Ended { next, ready: false, lasted: Duration::ZERO };
+        let ended =
+            |next| Ended { next, ready: false, lasted: Duration::ZERO, identified: false, last_payload_ms: None };
         let base = session.as_ref().map_or(self.url.as_str(), |s| s.resume_url.as_str());
         let url = format!("{}{QUERY}", base.trim_end_matches('/'));
         let headers = self.fp.ws_headers();
@@ -391,14 +421,21 @@ impl Gateway {
             Some(s) => resume_payload(token, s, *seq),
             None => identify_payload(token, &self.fp),
         };
-        tracing::info!(resume = session.is_some(), "gateway connected");
+        let identified = session.is_none();
+        tracing::info!(resume = !identified, "gateway connected");
         if conn.send(&first).await.is_err() {
-            return ended(Next::Resume);
+            return Ended { identified, ..ended(Next::Resume) };
         }
-        let mut live = Live { gw: self, token, session, seq, gap, ready_at: None };
+        let mut live = Live { gw: self, token, session, seq, gap, ready_at: None, last_payload_ms: None };
         let next = live.pump(&mut conn, Duration::from_millis(interval.max(1))).await;
-        let ready_at = live.ready_at;
-        Ended { next, ready: ready_at.is_some(), lasted: ready_at.map_or(Duration::ZERO, |t| t.elapsed()) }
+        let (ready_at, last_payload_ms) = (live.ready_at, live.last_payload_ms);
+        Ended {
+            next,
+            ready: ready_at.is_some(),
+            lasted: ready_at.map_or(Duration::ZERO, |t| t.elapsed()),
+            identified,
+            last_payload_ms,
+        }
     }
 
     /// What a close code means. Fatal ones halt here.
@@ -501,6 +538,7 @@ struct Live<'a> {
     seq: &'a mut Option<u64>,
     gap: &'a mut Option<Gap>,
     ready_at: Option<Instant>,
+    last_payload_ms: Option<i64>,
 }
 
 impl Live<'_> {
@@ -526,7 +564,10 @@ impl Live<'_> {
                 }
                 got = conn.recv() => {
                     let v = match got {
-                        Recv::Payload(v) => v,
+                        Recv::Payload(v) => {
+                            self.last_payload_ms = Some(self.gw.state.timer.now_ms());
+                            v
+                        }
                         Recv::Closed(code) => return self.gw.on_close(code, self.token),
                     };
                     match self.on_payload(conn, v, &mut acked).await {

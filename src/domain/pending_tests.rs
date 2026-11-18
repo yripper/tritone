@@ -212,13 +212,42 @@ fn unjoined_thread_new_message_not_pending() {
     add_unjoined_thread(&w);
     w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(from_u2(at(1_000), 105))), NOW);
     assert!(w.ctx.live.is_unread(Id(105)));
-    // Not even with the whole server on full watch.
-    w.ctx.store.set_watch(Id(1), TargetKind::Guild, Some(WatchLevel::Full)).unwrap();
+    // Not with its parent on an explicit normal watch either.
+    w.ctx.store.set_watch(Id(101), TargetKind::Channel, Some(WatchLevel::Normal)).unwrap();
     let items = pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap();
     assert!(items.iter().all(|i| i.channel != Id(105)), "{items:?}");
     // Nor clutter in the listings.
     let servers = crate::domain::reading::list_servers(&w.ctx.live, &w.ctx.store, NOW, false).unwrap();
     assert_eq!(servers.iter().find(|s| s.id == Id(1)).unwrap().unread_channels, 0);
+}
+
+#[test]
+fn unjoined_thread_in_full_watch_forum_is_pending() {
+    let w = world(snap());
+    // A help forum where every question is a thread the user never joined.
+    let forum = Channel { kind: ChannelKind::Forum, name: Some("help".into()), ..text_channel(106, 1) };
+    let post = Channel {
+        kind: ChannelKind::PublicThread,
+        parent_id: Some(Id(106)),
+        name: Some("how-do-i".into()),
+        ..text_channel(107, 1)
+    };
+    w.ctx.live.apply(GatewayEvent::ChannelUpsert(forum), NOW);
+    w.ctx.live.apply(GatewayEvent::ChannelUpsert(post), NOW);
+    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(from_u2(at(1_000), 107))), NOW);
+    assert!(pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap().is_empty(), "unwatched: not the user's");
+
+    w.ctx.store.set_watch(Id(106), TargetKind::Channel, Some(WatchLevel::Full)).unwrap();
+    let items = pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap();
+    assert_eq!(reasons(&items), vec![(107, Reason::FullWatch)]);
+    assert_eq!(items[0].label, "G001 › #help › how-do-i");
+    let servers = crate::domain::reading::list_servers(&w.ctx.live, &w.ctx.store, NOW, false).unwrap();
+    assert_eq!(servers.iter().find(|s| s.id == Id(1)).unwrap().unread_channels, 1);
+
+    // A server-wide full watch counts too.
+    w.ctx.store.set_watch(Id(106), TargetKind::Channel, None).unwrap();
+    w.ctx.store.set_watch(Id(1), TargetKind::Guild, Some(WatchLevel::Full)).unwrap();
+    assert_eq!(reasons(&pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap()), vec![(107, Reason::FullWatch)]);
 }
 
 #[test]

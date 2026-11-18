@@ -71,7 +71,7 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 - `parse_dispatch(t, d, me)` (`src/discord/gateway/events.rs:67`) → `Vec<GatewayEvent>`:
   - MESSAGE_CREATE and MESSAGE_ACK;
   - CHANNEL_CREATE/UPDATE and THREAD_CREATE/UPDATE → `ChannelUpsert`; CHANNEL_DELETE and THREAD_DELETE → `ChannelDelete`. A THREAD_CREATE with `member` (the user was added) is `joined`; a `newly_created` one without it isn't;
-  - THREAD_LIST_SYNC → one `ChannelUpsert` per thread, `joined` when the user's `members` list has it. Op 37's `threads: true` syncs every active thread, so most are unjoined;
+  - THREAD_LIST_SYNC → one `ChannelUpsert` per thread, `joined` when the user's `members` list has it. Op 37's `threads: true` syncs every active thread, so most are unjoined (they stay out of pending unless on full watch, see domain.md);
   - THREAD_MEMBER_UPDATE (the user's own) → `ThreadMembership { joined: true }`; THREAD_MEMBERS_UPDATE adding or removing the user → `ThreadMembership`, others' changes give nothing;
   - GUILD_CREATE → `GuildUpsert`, with channels plus threads (all `joined`: READY and GUILD_CREATE only sync joined threads to user accounts), and my roles from `members`;
   - GUILD_UPDATE, and GUILD_DELETE (skipped when `unavailable`, an outage);

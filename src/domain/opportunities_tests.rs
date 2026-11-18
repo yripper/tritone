@@ -338,3 +338,17 @@ async fn my_message_closes_older_rows_in_that_channel() {
     assert_eq!(status(&in_thread), OpportunityStatus::Open, "another channel");
     assert_eq!(ids(&get_opportunities(&r.ctx, 15).await.unwrap()), [later.id, in_thread.id]);
 }
+
+#[tokio::test]
+async fn a_thread_started_from_a_question_answers_it() {
+    let r = rig();
+    let q = gmsg(60, 100, 2, "how do I do this?");
+    arrive(&r, &q);
+    // Someone clicked "Create Thread" on it: the thread takes the message's id.
+    let mut thread = text_channel(q.id.0, 10);
+    thread.kind = ChannelKind::PublicThread;
+    thread.parent_id = Some(Id(100));
+    r.ctx.live.apply(GatewayEvent::ChannelUpsert(thread), T0);
+    assert!(get_opportunities(&r.ctx, 15).await.unwrap().is_empty());
+    assert_eq!(r.ctx.store.opportunity(q.id).unwrap().unwrap().status, OpportunityStatus::Answered);
+}

@@ -223,6 +223,12 @@ pub struct Opportunity {
     pub link: String,
 }
 
+/// Someone started a thread from the message: Discord gives the thread the
+/// message's id. https://docs.discord.food/resources/channel#create-thread-from-message
+fn thread_started_from(message: Id, live: &LiveState) -> bool {
+    live.channel(message).is_some_and(|c| c.kind.is_thread())
+}
+
 /// Someone other than the author replied to it, or wrote in a thread started from it.
 fn answered_by_others(msg: &Message, later: &[Message], live: &LiveState) -> bool {
     let replied = later.iter().any(|m| m.reply_to == Some(msg.id) && m.author.id != msg.author.id);
@@ -235,8 +241,8 @@ fn answered_by_others(msg: &Message, later: &[Message], live: &LiveState) -> boo
 /// - from the last `unanswered_max_age_hours`, in channels still on full watch;
 /// - a question shows only once it's `unanswered_after_mins` old;
 /// - one someone other than its author answered (a reply, or a message in a
-///   thread started from it) is marked answered and dropped, as is one whose
-///   message is gone.
+///   thread started from it) is marked answered and dropped, as is a question
+///   with a thread started from it, and one whose message is gone.
 ///
 /// The message and its context come from the live buffer, else from
 /// `around(channel, message, 10)` (e.g. after a restart, or past the buffer's
@@ -258,6 +264,12 @@ pub async fn get_opportunities(ctx: &Ctx, limit: usize) -> Result<Vec<Opportunit
         }
         let Some(channel) = ctx.live.channel(row.channel_id) else { continue };
         if !full_watch(&channel, &watch) {
+            continue;
+        }
+        // A question someone opened a thread on is being answered there, even
+        // when tritone doesn't see the thread's messages.
+        if rule == Rule::Question && thread_started_from(row.message_id, &ctx.live) {
+            ctx.store.set_opportunity_status(row.message_id, OpportunityStatus::Answered, now)?;
             continue;
         }
         let buffered = ctx.live.recent(row.channel_id);

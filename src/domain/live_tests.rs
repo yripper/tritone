@@ -515,3 +515,20 @@ fn role_events_change_visibility() {
     // Unknown guilds are ignored.
     l.apply(GatewayEvent::RoleDelete { guild: Id(99), role: Id(1) }, NOW);
 }
+
+#[test]
+fn new_threads_under_buffered_parents_are_buffered() {
+    let l = ready_live();
+    l.set_buffered(HashSet::from([Id(101)]));
+    let thread = |id: u64, parent: u64| Channel {
+        kind: crate::discord::types::ChannelKind::PublicThread,
+        parent_id: Some(Id(parent)),
+        ..text_channel(id, 1)
+    };
+    l.apply(GatewayEvent::ChannelUpsert(thread(160, 101)), NOW);
+    l.apply(GatewayEvent::ChannelUpsert(thread(170, 102)), NOW);
+    create(&l, msg(id_at(NOW - 1_000), 160, 2, "in a new thread"));
+    create(&l, msg(id_at(NOW - 900), 170, 2, "elsewhere"));
+    assert_eq!(l.recent(Id(160)).len(), 1, "its parent is buffered");
+    assert!(l.recent(Id(170)).is_empty());
+}

@@ -459,6 +459,11 @@ impl Inner {
         c.last_message_id = c.last_message_id.max(old.and_then(|o| o.last_message_id));
         // THREAD_UPDATE carries no membership: only ThreadMembership leaves.
         c.joined |= old.is_some_and(|o| o.joined);
+        // A thread created under a buffered (full-watch) channel is buffered
+        // too; the set is otherwise built only at READY.
+        if c.kind.is_thread() && c.parent_id.is_some_and(|p| self.buffered.contains(&p)) {
+            self.buffered.insert(c.id);
+        }
         for u in &c.recipients {
             self.users.insert(u.id, u.clone());
         }

@@ -66,12 +66,14 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
   - `my_roles` come only from the user's own entry in `merged_members` (index-aligned with `guilds`), else from the supplemental's own entry. Other users' entries are never used: with PRIORITIZED_READY_PAYLOAD, READY_SUPPLEMENTAL's `merged_members` hold other people's members (https://docs.discord.food/gateway/gateway-events#ready, note 7).
   - `user_guild_settings` for guilds not in READY are dropped.
   - Guilds can be plain or carry `properties`.
+  - Threads in READY guilds are `joined`: user accounts are only synced threads they've been added to (`guild_channels`, `src/discord/gateway/objects.rs`).
 - `supplemental_roles` (`src/discord/gateway/ready.rs:104`): `MyRolesUpdate` only for guilds whose READY_SUPPLEMENTAL list holds the user's own member (normally none: READY carries it).
-- `parse_dispatch(t, d, me)` (`src/discord/gateway/events.rs:61`) → `Vec<GatewayEvent>`:
+- `parse_dispatch(t, d, me)` (`src/discord/gateway/events.rs:67`) → `Vec<GatewayEvent>`:
   - MESSAGE_CREATE and MESSAGE_ACK;
-  - CHANNEL_CREATE/UPDATE and THREAD_CREATE/UPDATE → `ChannelUpsert`; CHANNEL_DELETE and THREAD_DELETE → `ChannelDelete`;
-  - THREAD_LIST_SYNC → one `ChannelUpsert` per thread;
-  - GUILD_CREATE → `GuildUpsert`, with channels plus threads, and my roles from `members`;
+  - CHANNEL_CREATE/UPDATE and THREAD_CREATE/UPDATE → `ChannelUpsert`; CHANNEL_DELETE and THREAD_DELETE → `ChannelDelete`. A THREAD_CREATE with `member` (the user was added) is `joined`; a `newly_created` one without it isn't;
+  - THREAD_LIST_SYNC → one `ChannelUpsert` per thread, `joined` when the user's `members` list has it. Op 37's `threads: true` syncs every active thread, so most are unjoined (they stay out of pending unless on full watch, see domain.md);
+  - THREAD_MEMBER_UPDATE (the user's own) → `ThreadMembership { joined: true }`; THREAD_MEMBERS_UPDATE adding or removing the user → `ThreadMembership`, others' changes give nothing;
+  - GUILD_CREATE → `GuildUpsert`, with channels plus threads (all `joined`: READY and GUILD_CREATE only sync joined threads to user accounts), and my roles from `members`;
   - GUILD_UPDATE, and GUILD_DELETE (skipped when `unavailable`, an outage);
   - GUILD_MEMBER_UPDATE for `me` → `MyRolesUpdate`;
   - GUILD_ROLE_CREATE/UPDATE/DELETE;

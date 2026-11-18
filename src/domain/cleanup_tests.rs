@@ -249,3 +249,19 @@ async fn apply_stops_on_halt() {
     assert_eq!(r.ctx.live.connection(), ConnState::Halted(DiscordError::Captcha));
     assert!(!r.api.calls().contains(&Call::LeaveGuild(Id(20))));
 }
+
+#[tokio::test]
+async fn backfill_and_cleanup_searches_never_overlap() {
+    let r = rig();
+    index(&r, (0..60).map(|i| my_post(90 + i, 100, 10)).collect());
+    let (b, p) = tokio::join!(
+        crate::domain::activity::backfill_with(&r.ctx, "backfill", &r.pacer),
+        cleanup_plan_with(&r.ctx, &r.pacer),
+    );
+    b.unwrap();
+    p.unwrap();
+    let searches = r.api.times_of(|c| matches!(c, Call::Search { .. }));
+    assert!(searches.len() >= 4, "{searches:?}");
+    assert_eq!(r.api.max_concurrent_searches(), 1, "one search at a time");
+    assert!(searches.windows(2).all(|w| w[1] - w[0] >= 3_000), "3-6 s between any two: {searches:?}");
+}

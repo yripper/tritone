@@ -243,6 +243,21 @@ async fn rest_reads_record_guild_authors() {
 
     let found = Message { guild_id: Some(Id(2)), ..msg(at(2_000), 111, 6, "hit") };
     w.fake.search_index.lock().unwrap().push(found);
-    search(&w.ctx, SearchScope::Guild(Id(2)), &SearchQuery::default()).await.unwrap();
+    search(&w.ctx, &pacer(), SearchScope::Guild(Id(2)), &SearchQuery::default()).await.unwrap();
     assert_eq!(w.ctx.live.guild_people(Id(2)).iter().map(|u| u.id).collect::<Vec<_>>(), vec![Id(6)]);
+}
+
+fn pacer() -> crate::domain::paced_search::SearchPacer {
+    let gaps = crate::domain::clock::fake::SeqGaps::new(&[4_000]);
+    crate::domain::paced_search::SearchPacer::new(std::sync::Arc::new(gaps))
+}
+
+#[tokio::test]
+async fn searches_are_paced() {
+    let w = world(snap());
+    let p = pacer();
+    for _ in 0..2 {
+        search(&w.ctx, &p, SearchScope::Guild(Id(2)), &SearchQuery::default()).await.unwrap();
+    }
+    assert_eq!(w.ctx.timer.now_ms(), NOW + 4_000, "the second search waited the gap");
 }

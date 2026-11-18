@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::discord::types::{Channel, ChannelKind, Id, SearchQuery, SearchScope};
 use crate::domain::errors::{Error, Result};
 use crate::domain::live::LiveState;
+use crate::domain::paced_search::SearchPacer;
 use crate::domain::pending::{effective_watch, listable};
 use crate::domain::render::{RenderedMessage, render_message, rfc3339};
 use crate::domain::resolve::channel_label;
@@ -113,9 +114,11 @@ pub struct SearchResult {
     pub messages: Vec<RenderedMessage>,
 }
 
-/// Discord's own search, in one server or one channel (DMs included).
-pub async fn search(ctx: &Ctx, scope: SearchScope, query: &SearchQuery) -> Result<SearchResult> {
-    let page = ctx.api.search(scope, query).await?;
+/// Discord's own search, in one server or one channel (DMs included),
+/// through `pacer` so it never runs alongside another search (backfill,
+/// voice, cleanup).
+pub async fn search(ctx: &Ctx, pacer: &SearchPacer, scope: SearchScope, query: &SearchQuery) -> Result<SearchResult> {
+    let page = pacer.search(ctx, scope, query).await?;
     ctx.live.note_authors(&page.messages);
     Ok(SearchResult {
         total: page.total,

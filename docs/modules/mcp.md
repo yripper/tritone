@@ -21,7 +21,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
   - `get_pending` (`src/mcp/tools/read.rs:130`) → `{pending: [{channel, label, reason, unread_count_hint, mention_count, messages, more_unread, pings?, error?}], truncated}` (`truncated`: the mentions inbox wasn't read whole for its 7 days: more than 5 pages, or a page failed). Never acks.
   - `read_history{channel, limit=50, before?, peek=false}` (`src/mcp/tools/read.rs:137`): marks read unless `peek` or `before`.
   - `read_thread{thread, limit=50, peek=false}` (`src/mcp/tools/read.rs:148`).
-  - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages).
+  - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages). Paced through `SearchPacer::global()`, shared with backfill, voice and cleanup.
   - `get_channel_info{channel}` (`src/mcp/tools/read.rs:194`), `find_user{query}` (`src/mcp/tools/read.rs:206`) → `{users}`.
 - **Triage** (`src/mcp/tools/triage.rs`):
   - `mark_read{channels[]}` (`src/mcp/tools/triage.rs:85`): every name must resolve first, or nothing is acked; → `{marked, already_read, not_found}`.

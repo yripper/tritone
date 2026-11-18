@@ -8,6 +8,7 @@ use serde_json::json;
 
 use crate::discord::types::{Id, SearchQuery, SearchScope};
 use crate::domain::errors::{Error, Result as DResult};
+use crate::domain::paced_search::SearchPacer;
 use crate::domain::pending::get_pending;
 use crate::domain::reading::{self, KindFilter};
 use crate::domain::resolve::{resolve_channel, resolve_server, resolve_user, snowflake};
@@ -183,7 +184,7 @@ impl TritoneServer {
                         ));
                     }
                 };
-                reading::search(&ctx, scope, &query).await
+                reading::search(&ctx, SearchPacer::global(), scope, &query).await
             })
             .await)
     }

@@ -32,6 +32,7 @@ use crate::discord::types::{DiscordError, Id};
 use crate::domain::live::ConnState;
 use crate::mcp::state::AppState;
 use crate::secrets::ACCOUNT_TOKEN;
+use crate::store::WatchMap;
 
 pub(crate) const GATEWAY_URL: &str = "wss://gateway.discord.gg";
 /// Appended to the gateway and resume URLs alike.
@@ -664,7 +665,7 @@ impl Live<'_> {
 
         let watch = self.gw.state.store.all_watch().unwrap_or_else(|e| {
             tracing::warn!("reading watch levels failed: {e:#}");
-            HashMap::new()
+            WatchMap::default()
         });
         let buffered = full_watch_channels(&snap.channels, &watch);
         let packets = self.gap.take().map(|g| self.gw.subscriptions(&snap, &g, &buffered)).unwrap_or_default();

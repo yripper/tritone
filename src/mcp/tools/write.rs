@@ -4,12 +4,14 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
 use rmcp::{ErrorData as McpError, tool, tool_router};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::discord::types::{ChannelKind, Id};
 use crate::domain::errors::{Error, Result as DResult};
 use crate::domain::live::LiveState;
-use crate::domain::send_queue::JobSpec;
+use crate::domain::render::to_discord_mentions;
+use crate::domain::resolve::resolve_channel;
+use crate::domain::send_queue::{Enqueued, JobSpec};
 use crate::mcp::server::{TritoneServer, json};
 use crate::mcp::state::Ctx;
 
@@ -59,37 +61,36 @@ pub struct SendStatusArgs {
     pub job_id: Option<u64>,
 }
 
-/// A channel id from an id or a `discord.com/channels/g/c[/m]` link, known
-/// to the live model.
-// TODO(resolve): switch to the shared channel resolver (names, #channel, @user) once it lands.
+/// The channel to write to, through the shared resolver: id, link, `#name`,
+/// `server/#name`, `@user` or part of a name. Several matches are an
+/// `Ambiguous` error listing them: a write never guesses. Unlike a read, a
+/// write also refuses an id the live model doesn't hold.
 fn target(query: &str, live: &LiveState) -> DResult<Id> {
-    let q = query.trim();
-    let raw = match q.find("discord.com/channels/") {
-        Some(at) => q[at..].split('/').nth(3).unwrap_or_default(),
-        None => q.trim_start_matches(['#', '<', '>']).trim_end_matches('>'),
-    };
-    let id: Id = raw
-        .parse()
-        .map_err(|_| Error::Invalid(format!("\"{query}\" is not a channel id or link: pass the channel's id")))?;
+    let id = resolve_channel(query, live)?;
     if live.channel(id).is_none() {
         return Err(Error::NotFound(query.to_string()));
     }
     Ok(id)
 }
 
-/// Outgoing text with `@username` turned into mentions where unambiguous.
-// TODO(mentions): call `domain::render::to_discord_mentions(text, live, guild)` once it lands.
-fn outgoing_text(text: &str, live: &LiveState, guild: Option<Id>) -> String {
-    let _ = (live, guild);
-    text.to_string()
+/// Outgoing text with `@name` turned into mentions where that can't reach the
+/// wrong person (see `to_discord_mentions`).
+fn outgoing_text(text: &str, live: &LiveState, channel: Id, reply_to: Option<Id>) -> String {
+    to_discord_mentions(text, live, channel, reply_to)
 }
 
-fn guild_of(live: &LiveState, channel: Id) -> Option<Id> {
-    live.channel(channel).and_then(|c| c.guild_id)
+/// An enqueue result plus the text that will go out, so it can be shown when
+/// the mention conversion changed it.
+#[derive(Serialize)]
+struct Queued {
+    #[serde(flatten)]
+    job: Enqueued,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    final_text: Option<String>,
 }
 
 /// Queues a job with the current REST client.
-fn enqueue(ctx: &Ctx, spec: JobSpec) -> DResult<crate::domain::send_queue::Enqueued> {
+fn enqueue(ctx: &Ctx, spec: JobSpec) -> DResult<Enqueued> {
     ctx.queue.attach(ctx.api.clone());
     ctx.queue.enqueue(spec)
 }
@@ -108,9 +109,11 @@ impl TritoneServer {
         Ok(self
             .run(|ctx| async move {
                 let channel = target(&a.channel, &ctx.live)?;
-                let content = outgoing_text(&a.text, &ctx.live, guild_of(&ctx.live, channel));
+                let content = outgoing_text(&a.text, &ctx.live, channel, a.reply_to);
                 let kind = a.kind.filter(|k| !k.trim().is_empty());
-                enqueue(&ctx, JobSpec::Send { channel, content, reply_to: a.reply_to, kind })
+                let job =
+                    enqueue(&ctx, JobSpec::Send { channel, content: content.clone(), reply_to: a.reply_to, kind })?;
+                Ok(Queued { job, final_text: Some(content) })
             })
             .await)
     }
@@ -138,9 +141,9 @@ impl TritoneServer {
                 if !matches!(kind, Some(ChannelKind::Text | ChannelKind::Announcement)) {
                     return Err(Error::Invalid("threads can only be created in a server text or announcement channel; for a forum use create_forum_post".into()));
                 }
-                let guild = guild_of(&ctx.live, channel);
-                let content = a.text.map(|t| outgoing_text(&t, &ctx.live, guild));
-                enqueue(&ctx, JobSpec::Thread { channel, from_message: a.from_message, name: a.name, content })
+                let content = a.text.map(|t| outgoing_text(&t, &ctx.live, channel, None));
+                let spec = JobSpec::Thread { channel, from_message: a.from_message, name: a.name, content: content.clone() };
+                Ok(Queued { job: enqueue(&ctx, spec)?, final_text: content })
             })
             .await)
     }
@@ -157,8 +160,9 @@ impl TritoneServer {
                         "that channel is not a forum: use send_message or create_thread".into(),
                     ));
                 }
-                let content = outgoing_text(&a.text, &ctx.live, guild_of(&ctx.live, forum));
-                enqueue(&ctx, JobSpec::ForumPost { forum, name: a.title, content })
+                let content = outgoing_text(&a.text, &ctx.live, forum, None);
+                let job = enqueue(&ctx, JobSpec::ForumPost { forum, name: a.title, content: content.clone() })?;
+                Ok(Queued { job, final_text: Some(content) })
             })
             .await)
     }

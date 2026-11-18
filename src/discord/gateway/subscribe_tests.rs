@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use super::*;
-use crate::store::WatchLevel;
+use crate::store::{WatchLevel, WatchMap};
 use crate::test_support::*;
 
 const T: i64 = 1_800_000_000_000;
@@ -59,13 +59,25 @@ fn full_watch_channels_follow_overrides() {
     let mut thread = text_channel(103, 1);
     thread.kind = crate::discord::types::ChannelKind::PublicThread;
     thread.parent_id = Some(Id(101));
-    let channels = vec![text_channel(101, 1), text_channel(102, 1), thread, text_channel(201, 2), text_channel(202, 2)];
-    let watch: HashMap<Id, WatchLevel> =
-        [(Id(1), WatchLevel::Full), (Id(102), WatchLevel::Normal), (Id(202), WatchLevel::Full)].into();
+    // G003 is an older server: its default channel has the server's id.
+    let channels = vec![
+        text_channel(101, 1),
+        text_channel(102, 1),
+        thread,
+        text_channel(201, 2),
+        text_channel(202, 2),
+        text_channel(3, 3),
+        text_channel(301, 3),
+    ];
+    let watch = WatchMap {
+        guilds: [(Id(1), WatchLevel::Full), (Id(3), WatchLevel::Full)].into(),
+        channels: [(Id(102), WatchLevel::Normal), (Id(202), WatchLevel::Full), (Id(3), WatchLevel::Muted)].into(),
+    };
     let mut got: Vec<Id> = full_watch_channels(&channels, &watch).into_iter().collect();
     got.sort();
-    // 101 and its thread via the guild, 102 overridden down, 202 on its own.
-    assert_eq!(got, vec![Id(101), Id(103), Id(202)]);
+    // 101 and its thread via the guild, 102 overridden down, 202 on its own;
+    // in G003 the default channel is muted on its own while 301 follows the server.
+    assert_eq!(got, vec![Id(101), Id(103), Id(202), Id(301)]);
 }
 
 #[test]

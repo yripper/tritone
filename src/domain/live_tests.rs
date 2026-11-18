@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use super::*;
 use crate::discord::gateway::GatewayEvent;
-use crate::discord::types::{Channel, DiscordError, Id, MuteUntil, Overwrite, Role};
+use crate::discord::types::{Channel, DiscordError, Id, Message, MuteUntil, Overwrite, Role};
 use crate::test_support::*;
 
 const ME: u64 = 7;
@@ -52,6 +52,42 @@ fn ready_populates_model() {
     assert_eq!(l.user(Id(2)).unwrap().username, "U002", "DM recipients are known users");
     assert_eq!(l.user(Id(ME)).unwrap().username, "U007");
     assert!(matches!(rx.try_recv().unwrap(), LiveEvent::Ready));
+}
+
+#[test]
+fn users_lists_known_users_and_me() {
+    let l = live();
+    assert!(l.users().is_empty());
+    let mut snap = ready(ME, vec![guild(1)], vec![dm(201, 2)]);
+    snap.users.push(user(3));
+    l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    create(&l, msg(id_at(NOW), 201, 4, "hi"));
+    let mut ids: Vec<u64> = l.users().iter().map(|u| u.id.0).collect();
+    ids.sort();
+    assert_eq!(ids, vec![2, 3, 4, ME], "READY users, DM recipients, authors seen, and me");
+}
+
+#[test]
+fn guild_people_are_authors_seen_there() {
+    let l = live();
+    let mut snap = ready(ME, vec![guild(1), guild(2)], vec![text_channel(101, 1), text_channel(201, 2)]);
+    snap.users.push(user(9));
+    l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    l.set_buffered(HashSet::from([Id(101)]));
+    create(&l, msg(id_at(NOW), 101, 3, "buffered in G001"));
+    create(&l, msg(id_at(NOW), 201, 5, "G002, not buffered"));
+    // REST pages: a message without guild_id is placed by its channel;
+    // one in a channel tritone doesn't hold, by its own guild_id.
+    let elsewhere = Message { guild_id: Some(Id(2)), ..msg(id_at(NOW - 2), 999, 6, "b") };
+    l.note_authors(&[msg(id_at(NOW - 1), 101, 4, "a"), elsewhere, msg(id_at(NOW - 3), 4242, 8, "no guild known")]);
+    let ids = |g: u64| {
+        let mut v: Vec<u64> = l.guild_people(Id(g)).iter().map(|u| u.id.0).collect();
+        v.sort();
+        v
+    };
+    assert_eq!(ids(1), vec![3, 4], "the buffer's and REST's authors in G001, not the friend U009");
+    assert_eq!(ids(2), vec![6]);
+    assert!(l.user(Id(4)).is_some(), "noted authors can be named");
 }
 
 #[test]

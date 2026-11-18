@@ -67,6 +67,9 @@ pub struct ServerEntry {
     pub my_last_post: Option<String>,
     /// False until a search (or the local log) told when the user last posted.
     pub last_post_known: bool,
+    /// The server refused the lookup (no access to search there, or gone):
+    /// the last post stays unknown and isn't retried for a day.
+    pub search_unavailable: bool,
     /// A server or channel there is on full watch in tritone.
     pub full_watch: bool,
     pub owner: bool,
@@ -89,6 +92,10 @@ struct LastPost {
     checked_at: i64,
     /// Unix ms; `None` = no post found.
     last: Option<i64>,
+    /// The server refused the search (Forbidden) or is gone (NotFound):
+    /// `last` tells nothing. Cached like a result, so the next plans move on.
+    #[serde(default)]
+    unsearchable: bool,
 }
 
 fn kv_key(guild: Id) -> String {
@@ -99,6 +106,12 @@ fn cached_last_post(store: &Store, guild: Id, now: i64) -> Result<Option<LastPos
     let Some(raw) = store.kv_get(&kv_key(guild))? else { return Ok(None) };
     let cached: Option<LastPost> = serde_json::from_str(&raw).ok();
     Ok(cached.filter(|c| now - c.checked_at < LAST_POST_TTL_MS))
+}
+
+fn cache_last_post(store: &Store, guild: Id, found: LastPost) -> Result<LastPost> {
+    let json = serde_json::to_string(&found).map_err(|e| Error::Store(e.into()))?;
+    store.kv_set(&kv_key(guild), &json)?;
+    Ok(found)
 }
 
 fn date(ms: i64) -> String {
@@ -131,17 +144,20 @@ fn unread_channels(live: &LiveState, guild: Id) -> Vec<(Id, Id)> {
     out
 }
 
-/// The last post a search found, cached for a day. `Ok(None)` means the
-/// search couldn't tell (no access, or the index never got ready).
+/// The last post a search found, cached for a day. A refusal (Forbidden,
+/// NotFound) is cached too, as `unsearchable`. `Ok(None)` means the search
+/// couldn't tell this time (the index never got ready, a network error).
 async fn look_up_last_post(ctx: &Ctx, pacer: &SearchPacer, guild: Id, me: Id, now: i64) -> Result<Option<LastPost>> {
     let q = SearchQuery { author_id: Some(me), ..SearchQuery::default() };
     match pacer.search(ctx, SearchScope::Guild(guild), &q).await {
         Ok(page) => {
             observe_own(&ctx.store, &page.messages, me, Some(guild), now)?;
-            let found = LastPost { checked_at: now, last: page.messages.iter().map(|m| m.timestamp_ms).max() };
-            let json = serde_json::to_string(&found).map_err(|e| Error::Store(e.into()))?;
-            ctx.store.kv_set(&kv_key(guild), &json)?;
-            Ok(Some(found))
+            let last = page.messages.iter().map(|m| m.timestamp_ms).max();
+            cache_last_post(&ctx.store, guild, LastPost { checked_at: now, last, unsearchable: false }).map(Some)
+        }
+        Err(Error::Discord(DiscordError::Forbidden | DiscordError::NotFound)) => {
+            tracing::warn!("cleanup lookup refused; cached for a day");
+            cache_last_post(&ctx.store, guild, LastPost { checked_at: now, last: None, unsearchable: true }).map(Some)
         }
         Err(Error::Discord(e)) if !e.halts() => {
             tracing::warn!(kind = e.kind(), "cleanup lookup failed");
@@ -159,6 +175,8 @@ struct Facts {
     owner: bool,
     /// `Some(last)` when known, where `last` is `None` for never.
     last_post: Option<Option<i64>>,
+    /// A cached lookup said search isn't available there.
+    unsearchable: bool,
     has_local: bool,
 }
 
@@ -241,10 +259,11 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
         let local = ctx.store.last_own_post_in_guild(g.id)?;
         let cached = cached_last_post(&ctx.store, g.id, now)?;
         let recent_local = local.filter(|t| *t >= now - MUTE_AFTER_DAYS * DAY_MS);
+        let unsearchable = recent_local.is_none() && cached.is_some_and(|c| c.unsearchable);
         let last_post = match (recent_local, cached) {
             (Some(t), _) => Some(Some(t)),
-            (None, Some(c)) => Some(c.last.max(local)),
-            (None, None) => None,
+            (None, Some(c)) if !c.unsearchable => Some(c.last.max(local)),
+            _ => None,
         };
         facts.push(Facts {
             id: g.id,
@@ -253,17 +272,23 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
             full_watch: full_watch_in_guild(&watch, &ctx.live, g.id),
             owner: g.owner_id == me,
             last_post,
+            unsearchable,
             has_local: local.is_some(),
         });
     }
 
     // Look up the servers most likely to need a suggestion first.
-    let mut todo: Vec<usize> = (0..facts.len()).filter(|i| facts[*i].last_post.is_none()).collect();
+    let mut todo: Vec<usize> =
+        (0..facts.len()).filter(|i| facts[*i].last_post.is_none() && !facts[*i].unsearchable).collect();
     todo.sort_by_key(|i| (facts[*i].has_local, std::cmp::Reverse(facts[*i].unread.len()), facts[*i].id));
     for i in todo.into_iter().take(MAX_LOOKUPS_PER_PLAN) {
-        if let Some(found) = look_up_last_post(ctx, pacer, facts[i].id, me, now).await? {
-            let local = ctx.store.last_own_post_in_guild(facts[i].id)?;
-            facts[i].last_post = Some(found.last.max(local));
+        match look_up_last_post(ctx, pacer, facts[i].id, me, now).await? {
+            Some(found) if found.unsearchable => facts[i].unsearchable = true,
+            Some(found) => {
+                let local = ctx.store.last_own_post_in_guild(facts[i].id)?;
+                facts[i].last_post = Some(found.last.max(local));
+            }
+            None => {}
         }
     }
 
@@ -279,6 +304,7 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
             unread_channels: f.unread.len(),
             my_last_post: f.last_post.flatten().map(date),
             last_post_known: f.last_post.is_some(),
+            search_unavailable: f.unsearchable,
             full_watch: f.full_watch,
             owner: f.owner,
             suggestion: s,
@@ -291,7 +317,7 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
         None => 2,
     };
     servers.sort_by_key(|s| (rank(s), std::cmp::Reverse(s.unread_channels), s.id));
-    let lookups_pending = servers.iter().filter(|s| !s.last_post_known).count();
+    let lookups_pending = servers.iter().filter(|s| !s.last_post_known && !s.search_unavailable).count();
     let note = if lookups_pending > 0 {
         format!(
             "{lookups_pending} servers still need a last-post lookup (a few per call, paced): call cleanup_plan again for them. Nothing was changed."

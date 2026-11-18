@@ -21,7 +21,7 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 
 ## Public surface
 - `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
-- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `cleanup_last_post:<guild>` (cleanup's searched last post, JSON `{checked_at, last}`, trusted 24 h), `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
+- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `cleanup_last_post:<guild>` (cleanup's searched last post, JSON `{checked_at, last, unsearchable}`, trusted 24 h; `unsearchable` marks a server that refused the search), `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:43`), part of the watch key.
 - `WatchMap { guilds, channels }` (`src/store/watch.rs:59`): every explicit level, split by kind.

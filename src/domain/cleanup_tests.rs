@@ -301,3 +301,28 @@ async fn read_never_acks_past_the_plan_cutoff() {
     let bare = cleanup_apply_with(&r.ctx, &["read:20".to_string()], &r.gaps).await.unwrap();
     assert_eq!(bare[0].status, ApplyStatus::Failed);
 }
+
+#[tokio::test]
+async fn servers_search_refuses_are_cached_and_skipped() {
+    let r = rig();
+    // G030 (most unread, looked up first) refuses search; G010 is gone.
+    r.api.fail_on("search", DiscordError::Forbidden);
+    r.api.fail_on("search", DiscordError::NotFound);
+    let first = cleanup_plan_with(&r.ctx, &r.pacer).await.unwrap();
+    assert_eq!(searched_guilds(&r.api).len(), 4);
+    assert_eq!(first.lookups_pending, 0, "a refusal counts as checked");
+    for g in [30, 10] {
+        let e = entry(&first, g);
+        assert!(e.search_unavailable && !e.last_post_known && e.suggestion.is_none(), "G{g}: {e:?}");
+    }
+    assert!(!entry(&first, 20).search_unavailable);
+
+    // Within the day, the next plan doesn't ask again.
+    cleanup_plan_with(&r.ctx, &r.pacer).await.unwrap();
+    assert_eq!(searched_guilds(&r.api).len(), 4);
+    // After it, it does.
+    r.api.timer.advance(LAST_POST_TTL_MS);
+    let later = cleanup_plan_with(&r.ctx, &r.pacer).await.unwrap();
+    assert!(searched_guilds(&r.api).len() > 4);
+    assert!(!entry(&later, 30).search_unavailable);
+}

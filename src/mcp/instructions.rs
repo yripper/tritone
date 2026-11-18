@@ -48,7 +48,7 @@ Voice
 - list_stale_profiles shows categories due for a refresh.
 
 Cleanup
-- cleanup_plan proposes servers to leave and channels to mute, with when the user last wrote there, the unread volume and whether they're muted. It changes nothing. It looks up a few servers per call through search; when lookups_pending is above 0, call it again for the rest.
+- cleanup_plan proposes servers to leave and channels to mute, with when the user last wrote there, the unread volume and whether they're muted. It changes nothing. It looks up a few servers per call through search; when lookups_pending is above 0, call it again for the rest. A server with search_unavailable can't be looked up (no access to search there): its last post stays unknown, so ask the user about it rather than guess.
 - Show the user each suggested item (leave, mute, mark read) with its server or channel, and get a per-item OK: an explicit OK for each item on its own. A general go-ahead to clean up doesn't approve a list.
 - cleanup_apply carries out only the item ids the user approved, exactly as given, one at a time and a few seconds apart. Leaving a server or muting cannot be undone from here. A read item marks read only up to what the plan saw: channels with newer messages stay unread and come back as unseen. Show them to the user.
 

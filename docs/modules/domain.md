@@ -3,7 +3,7 @@
 Last verified: 2026-11-19
 
 ## Purpose
-The logic between the MCP tools and Discord: errors, time, the live model, the send queue and the contribution log.
+The logic between the MCP tools and Discord: errors, time, the live model, the send queue, the contribution log, paced search and voice.
 
 ## Structure
 - `src/domain/errors.rs`: `Error`, `Result`.
@@ -11,6 +11,8 @@ The logic between the MCP tools and Discord: errors, time, the live model, the s
 - `src/domain/live.rs`: `LiveState`, `BufferPolicy`, `ConnState`, `LiveEvent`. Tests: `src/domain/live_tests.rs`, with fixtures from `src/test_support.rs`.
 - `src/domain/send_queue.rs`: `SendQueue`, the paced write queue. Tests: `src/domain/send_queue_tests.rs`.
 - `src/domain/activity.rs`: the contribution log: `classify`, `record_own`, `spawn_recorder`, `backfill`, `my_activity`, plus `channel_label` and `message_link`. Tests: `src/domain/activity_tests.rs`.
+- `src/domain/paced_search.rs`: `SearchPacer`, Discord search one at a time with a random 3–6 s gap, for voice and cleanup. Tests: `src/domain/paced_search_tests.rs`.
+- `src/domain/voice.rs`: tone profiles per category, notes per channel, categories, own-message samples through search. Tests: `src/domain/voice_tests.rs`.
 - `src/domain/test_api.rs` (`cfg(test)`): `Api`, a `FakeDiscord` wrapper that stamps each call with `FakeTimer` time and fails the nth call of a method once (`fail_on`, `fail_on_nth`).
 
 ## Public surface
@@ -51,9 +53,19 @@ The logic between the MCP tools and Discord: errors, time, the live model, the s
 - `my_activity(store, live, from_ms, to_ms)` (`src/domain/activity.rs:380`) → `ActivitySummary { from, to, total, by_kind, by_server, by_channel, messages }`: counts (most first, then by label) and `ActivityLink { link, at, kind, server, channel, is_reply, via_tritone }` for the newest 50.
 - `channel_label(live, id)` (`src/domain/activity.rs:45`): `Server › #channel`, `Server › #parent › thread`, `@user (DM)`, `a, b (group DM)`. `message_link(guild, channel, message)` (`src/domain/activity.rs:37`): `https://discord.com/channels/{guild|@me}/{channel}/{message}`.
 - `halt_everything(live, e)` (`src/domain/send_queue.rs:333`, `pub(crate)`): `live.halt(e)` unless already halted, which keeps a token the REST client rejected.
+- `SearchPacer` (`src/domain/paced_search.rs:25`): `new(rng)` (`:35`) for tests, `global()` (`:40`) is the one the MCP tools share. `search(ctx, scope, query)` (`src/domain/paced_search.rs:47`): holds a `tokio::sync::Mutex` across the request, so searches from concurrent tool calls go one at a time; waits a random `SEARCH_GAP_MIN_MS..=SEARCH_GAP_MAX_MS` (3–6 s) after the previous search; refuses while `live` is halted; waits out `Indexing`/`RateLimited` (`retry_after_s`, 5 s when 0) at most `MAX_WAITS` (3) times; a halting error goes through `halt_everything`.
+- Voice (`src/domain/voice.rs`). Constants (`src/domain/voice.rs:22`): `STALE_OWN_MESSAGES` 30, `STALE_AGE_SECS` 21 days, `CHAT_SAMPLE` 60, `CATEGORY_SAMPLE` 40, `CATEGORY_THREADS` 3, `SUGGESTED_CATEGORIES` (`dev-community`, `work`, `friends`, `general`), `PROFILE_MAX` 4,000 and `NOTES_MAX` 2,000 characters.
+  - `is_stale(updated_at_ms, own_since, now_ms)` (`src/domain/voice.rs:37`): 30 own messages since, or 21 days old. `valid_category` (`src/domain/voice.rs:42`): `^[a-z0-9_-]{1,32}$`.
+  - `category_of(store, live, channel, guild_hint)` (`src/domain/voice.rs:65`): the channel's own category, else (thread) its parent channel's, else its server's (from `live`, else `guild_hint`), else `general`.
+  - `voice_context(store, live, channel, now)` (`src/domain/voice.rs:105`) → `VoiceContext { category, profile, notes, profile_stale, notes_stale, needs_learning }`. No notes means `notes_stale`; no profile or a stale one means `needs_learning`.
+  - `own_count_in_category` (`src/domain/voice.rs:91`) groups `own_message` rows by each channel's *current* category, so recategorizing moves activity with it. `stale_profiles(store, live, now)` (`src/domain/voice.rs:128`).
+  - `own_messages(ctx, pacer, channel, limit)` (`src/domain/voice.rs:227`): `search(author_id = me)`, in the server with a `channel_id` filter, or in the DM itself; at most 3 pages of 25. Every own hit is recorded in `own_message` (`observe_own`, `src/domain/voice.rs:154`); text is returned, never stored. Blank messages and those sent through tritone (activity `via_tritone`) are left out (`own_texts`, `src/domain/voice.rs:172`).
+  - `own_messages_in_category(ctx, pacer, category, except, limit)` (`src/domain/voice.rs:236`): at most 3 places: first the channels the user wrote in most recently (`own_message` and the contribution log) whose category matches, then channels and servers set to the category; a server is searched as a whole, keeping hits whose channel is in the category.
+  - `get_voice(ctx, pacer, channel)` (`src/domain/voice.rs:298`) → `VoiceReport`: the context, plus `my_messages_in_channel` when `needs_learning || notes_stale` and `my_messages_in_category` when `needs_learning`. A fresh profile and notes make no search.
+  - `save_profile` (`src/domain/voice.rs:318`), `save_chat_notes` (`:325`), `set_category` (`:332`) validate the slug and length, then write the store.
 
 ## Dependencies
-chrono, rand, sha2 (token hash), serde, tokio (sync broadcast, spawn), the `discord` types, the `store`, `config::Topic`, and `mcp::state::Ctx` (backfill).
+chrono, rand, sha2 (token hash), serde, tokio (sync broadcast and mutex, spawn), the `discord` types, the `store`, `config::Topic`, and `mcp::state::Ctx` (backfill, paced search, voice).
 
 ## Gotchas & invariants
 - `fake` is `#[cfg(test)]`: tests only.
@@ -61,6 +73,8 @@ chrono, rand, sha2 (token hash), serde, tokio (sync broadcast, spawn), the `disc
 - `mention_count` from READY is authoritative; live increments follow the same rule as Discord's badge (direct, my roles, @everyone/@here, with the server's suppress settings).
 - Queue text lives only in memory and is dropped when the job finishes; a restart drops unsent jobs. A job is retried only where a nonce makes the retry safe (once after a rate limit, once promptly after an unknown outcome); a write that may have gone out is `unknown`, never `failed`, so it isn't approved and sent twice.
 - `SendQueue::resume` is the only path that calls `live.clear_halt()` and `DiscordApi::clear_halt()`, and only the `resume_queue` tool (on the user's explicit OK) calls it. The tool first attaches the client `AppState` holds now.
+- Voice never stores message text: samples come from search on each `get_voice` call that needs them. `own_message` keeps ids and times for 22 days (`OWN_MESSAGE_KEEP_MS`), enough for the 21-day staleness window. DMs sent through tritone are not in the contribution log, so they still count toward a DM's staleness.
+- `SearchPacer::global()` paces voice and cleanup searches together; `backfill` keeps its own pacing, so a backfill running at the same time can interleave with them.
 - A halt is separate from the gateway's state: Disconnected, RESUMED and READY never lift it, so a routine reconnect can't silently resume after a CAPTCHA or a block.
 
 ## Testing

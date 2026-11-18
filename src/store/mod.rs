@@ -4,9 +4,11 @@
 mod activity;
 mod kv;
 mod schema;
+mod voice;
 mod watch;
 
 pub use activity::ActivityRow;
+pub use voice::{OWN_MESSAGE_KEEP_MS, OwnMessageRow, VoiceEntry};
 pub use watch::{TargetKind, WatchLevel};
 
 use std::path::Path;

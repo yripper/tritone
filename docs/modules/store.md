@@ -1,6 +1,6 @@
 # store
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels, snoozes, categories), voice notes, opportunity ids and the contribution log. **Never message text.**
@@ -19,7 +19,7 @@ All tables are created in v1, so features add methods, not migrations:
 
 ## Public surface
 - `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
-- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`.
+- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:42`).
 - `get_watch`, `set_watch` (`None` clears), `all_watch` (`src/store/watch.rs:61`, `:70`, `:84`).

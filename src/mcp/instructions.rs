@@ -48,7 +48,8 @@ Cleanup
 - cleanup_apply carries out only the items the user approved, one by one. Leaving a server or muting cannot be undone from here: get a per-item OK.
 
 Activity
-- my_activity summarizes what the user posted in servers over a period: counts by kind, server and channel, with links. backfill_activity fills in older history once, slowly; it can take a while and resumes where it stopped.
+- Every message the user posts in a server is logged (ids, time and kind only, never text), whether sent through tritone or typed in a Discord app. my_activity summarizes a period: counts by kind, server and channel, with links to the newest messages, so the user can point to their best answers.
+- backfill_activity fills in older history through Discord search, slowly, in the background. Call it once to start; call it again for progress or to continue after it stopped. It never sends anything.
 
 If a tool says the session is not valid or asks to log in, stop and tell the user to run `tritone login` in a terminal. A new login takes effect without a restart.";
 

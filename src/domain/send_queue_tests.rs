@@ -1,125 +1,15 @@
-use std::sync::Mutex as StdMutex;
-
-use async_trait::async_trait;
-
 use super::*;
 use crate::config::Config;
-use crate::discord::api::DResult;
-use crate::discord::fake::{Call, FakeDiscord};
+use crate::discord::fake::Call;
 use crate::discord::gateway::GatewayEvent;
-use crate::discord::types::{
-    Channel, ChannelKind, DiscordError, Id, Message, MuteTarget, OutgoingMessage, SearchPage, SearchQuery, SearchScope,
-    UserRef,
-};
+use crate::discord::types::{ChannelKind, DiscordError, Id};
 use crate::domain::clock::fake::{FakeTimer, SeqGaps};
 use crate::domain::live::{BufferPolicy, ConnState};
+use crate::domain::test_api::{Api, T0};
 use crate::test_support::{guild, ready, text_channel};
 
-const T0: i64 = 1_800_000_000_000;
 const CH: Id = Id(100);
 const FORUM: Id = Id(150);
-
-/// `FakeDiscord` plus the virtual time of every call and per-method failures.
-struct Api {
-    inner: FakeDiscord,
-    timer: Arc<FakeTimer>,
-    times: StdMutex<Vec<(Call, i64)>>,
-    /// (method, error): the next call of that method fails once.
-    fail: StdMutex<Vec<(&'static str, DiscordError)>>,
-}
-
-impl Api {
-    fn calls(&self) -> Vec<Call> {
-        self.inner.calls()
-    }
-
-    fn fail_on(&self, method: &'static str, e: DiscordError) {
-        self.fail.lock().unwrap().push((method, e));
-    }
-
-    /// When each call of the given kind happened, relative to T0.
-    fn times_of(&self, pick: fn(&Call) -> bool) -> Vec<i64> {
-        self.times.lock().unwrap().iter().filter(|(c, _)| pick(c)).map(|(_, t)| t - T0).collect()
-    }
-
-    fn check(&self, method: &'static str) -> DResult<()> {
-        let mut f = self.fail.lock().unwrap();
-        match f.iter().position(|(m, _)| *m == method) {
-            Some(i) => Err(f.remove(i).1),
-            None => Ok(()),
-        }
-    }
-
-    fn stamp(&self) {
-        let last = self.inner.calls().last().cloned();
-        if let Some(c) = last {
-            self.times.lock().unwrap().push((c, self.timer.now_ms()));
-        }
-    }
-}
-
-macro_rules! fwd {
-    ($self:ident, $m:literal, $call:expr) => {{
-        let r = $call.await;
-        $self.stamp();
-        $self.check($m)?;
-        r
-    }};
-}
-
-#[async_trait]
-impl DiscordApi for Api {
-    async fn history(&self, c: Id, b: Option<Id>, a: Option<Id>, l: u8) -> DResult<Vec<Message>> {
-        fwd!(self, "history", self.inner.history(c, b, a, l))
-    }
-    async fn around(&self, c: Id, m: Id, l: u8) -> DResult<Vec<Message>> {
-        fwd!(self, "around", self.inner.around(c, m, l))
-    }
-    async fn recent_mentions(&self, l: u8, b: Option<Id>) -> DResult<Vec<Message>> {
-        fwd!(self, "recent_mentions", self.inner.recent_mentions(l, b))
-    }
-    async fn search(&self, s: SearchScope, q: &SearchQuery) -> DResult<SearchPage> {
-        fwd!(self, "search", self.inner.search(s, q))
-    }
-    async fn ack(&self, c: Id, m: Id) -> DResult<()> {
-        fwd!(self, "ack", self.inner.ack(c, m))
-    }
-    async fn ack_bulk(&self, i: &[(Id, Id)]) -> DResult<()> {
-        fwd!(self, "ack_bulk", self.inner.ack_bulk(i))
-    }
-    async fn typing(&self, c: Id) -> DResult<()> {
-        fwd!(self, "typing", self.inner.typing(c))
-    }
-    async fn send(&self, c: Id, m: &OutgoingMessage) -> DResult<Message> {
-        // A failed send must not land in the fake's history: record it by hand.
-        if let Err(e) = self.check("send") {
-            self.inner.calls.lock().unwrap().push(Call::Send { channel: c, msg: m.clone() });
-            self.stamp();
-            return Err(e);
-        }
-        let r = self.inner.send(c, m).await;
-        self.stamp();
-        r
-    }
-    async fn react(&self, c: Id, m: Id, e: &str) -> DResult<()> {
-        fwd!(self, "react", self.inner.react(c, m, e))
-    }
-    async fn create_thread(&self, c: Id, f: Option<Id>, n: &str) -> DResult<Channel> {
-        fwd!(self, "create_thread", self.inner.create_thread(c, f, n))
-    }
-    async fn create_forum_post(&self, f: Id, n: &str, c: &str, nonce: Id) -> DResult<(Channel, Message)> {
-        fwd!(self, "create_forum_post", self.inner.create_forum_post(f, n, c, nonce))
-    }
-    async fn leave_guild(&self, g: Id) -> DResult<()> {
-        fwd!(self, "leave_guild", self.inner.leave_guild(g))
-    }
-    async fn set_mute(&self, t: MuteTarget, m: bool) -> DResult<()> {
-        fwd!(self, "set_mute", self.inner.set_mute(t, m))
-    }
-    async fn user(&self, u: Id) -> DResult<UserRef> {
-        fwd!(self, "user", self.inner.user(u))
-    }
-}
 
 struct Rig {
     api: Arc<Api>,
@@ -130,12 +20,7 @@ struct Rig {
 
 fn rig(gaps: &[u64]) -> Rig {
     let timer = Arc::new(FakeTimer::at(T0));
-    let api = Arc::new(Api {
-        inner: FakeDiscord::default(),
-        timer: timer.clone(),
-        times: StdMutex::new(Vec::new()),
-        fail: StdMutex::new(Vec::new()),
-    });
+    let api = Arc::new(Api::new(timer.clone()));
     let store = Arc::new(Store::open_in_memory().unwrap());
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 }));
     let mut forum = text_channel(FORUM.0, 10);

@@ -217,6 +217,15 @@ struct State {
     api: Option<Arc<dyn DiscordApi>>,
 }
 
+/// Halts all of tritone after a halting error, unless it's already halted:
+/// the REST client may have rejected the token (and remembered it), and a
+/// plain halt would forget which token died.
+pub(crate) fn halt_everything(live: &LiveState, e: &DiscordError) {
+    if !matches!(live.connection(), ConnState::Halted(_)) {
+        live.halt(e.clone());
+    }
+}
+
 /// When a job with `gap_ms` may start.
 fn earliest(now: i64, last: Option<i64>, gap_ms: u64, paused_until: Option<i64>, window: &VecDeque<i64>) -> i64 {
     let mut t = now;
@@ -619,11 +628,7 @@ impl SendQueue {
     /// Stops the queue and all of tritone. Jobs still queued stay queued
     /// for the user to resume or abandon.
     fn halt(&self, e: DiscordError) {
-        // The REST client may already have rejected the token (and remembered
-        // it): keep that, since a plain halt would forget which token died.
-        if !matches!(self.live.connection(), ConnState::Halted(_)) {
-            self.live.halt(e.clone());
-        }
+        halt_everything(&self.live, &e);
         self.pause(e);
     }
 

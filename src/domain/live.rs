@@ -267,6 +267,16 @@ impl LiveState {
         inner.users.get(&id).cloned().or_else(|| inner.me.clone().filter(|m| m.id == id))
     }
 
+    /// Every known user (READY's users, DM recipients, authors seen) plus me.
+    pub fn users(&self) -> Vec<UserRef> {
+        let inner = self.lock();
+        let mut all: Vec<UserRef> = inner.users.values().cloned().collect();
+        if let Some(me) = inner.me.as_ref().filter(|m| !inner.users.contains_key(&m.id)) {
+            all.push(me.clone());
+        }
+        all
+    }
+
     /// The newest message is past the last acked one. A channel with messages
     /// and no read state counts as unread.
     pub fn is_unread(&self, channel: Id) -> bool {

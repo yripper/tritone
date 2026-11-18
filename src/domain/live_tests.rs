@@ -55,6 +55,19 @@ fn ready_populates_model() {
 }
 
 #[test]
+fn users_lists_known_users_and_me() {
+    let l = live();
+    assert!(l.users().is_empty());
+    let mut snap = ready(ME, vec![guild(1)], vec![dm(201, 2)]);
+    snap.users.push(user(3));
+    l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    create(&l, msg(id_at(NOW), 201, 4, "hi"));
+    let mut ids: Vec<u64> = l.users().iter().map(|u| u.id.0).collect();
+    ids.sort();
+    assert_eq!(ids, vec![2, 3, 4, ME], "READY users, DM recipients, authors seen, and me");
+}
+
+#[test]
 fn message_create_marks_unread_and_publishes() {
     let l = ready_live();
     assert!(!l.is_unread(Id(101)));

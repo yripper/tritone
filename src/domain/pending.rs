@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::discord::types::{Channel, ChannelKind, Id, Message};
+use crate::discord::types::{Channel, ChannelKind, GuildSettings, Id, Message};
 use crate::domain::errors::Result;
 use crate::domain::live::LiveState;
 use crate::domain::render::{RenderedMessage, render_message};
@@ -38,6 +38,10 @@ pub struct PendingEntry {
     pub item: PendingItem,
     pub messages: Vec<RenderedMessage>,
     pub more_unread: bool,
+    /// For mentions and replies: the messages that ping the user, when
+    /// `messages` (the oldest unread) doesn't reach them.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub pings: Vec<RenderedMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -49,6 +53,11 @@ const FIRST_UNREAD: usize = 20;
 /// `get_pending` fetches messages for at most this many channels (one REST
 /// call each); later entries come without messages.
 const MAX_FETCH: usize = 15;
+/// History calls one `get_pending` may make in all, counting channels that
+/// turn out read (no read state, the user's message last).
+const MAX_CALLS: usize = 30;
+/// Pinging messages shown per entry.
+const MAX_PINGS: usize = 5;
 
 /// The watch level that applies: an explicit level on the channel (for a
 /// thread, then on its parent), then on its server; otherwise a Discord mute
@@ -97,22 +106,59 @@ struct Pings {
     group: bool,
 }
 
-fn pings(c: &Channel, msgs: &[Message], me: Id, live: &LiveState) -> Pings {
+/// How a message pings the user, if at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ping {
+    Direct,
+    Reply,
+    /// A role or @everyone/@here ping the server doesn't suppress.
+    Group,
+}
+
+fn ping_of(m: &Message, me: Id, settings: Option<&GuildSettings>, my_roles: &[Id]) -> Option<Ping> {
+    if m.mentions.contains(&me) {
+        return Some(Ping::Direct);
+    }
+    if m.reply_to_author == Some(me) {
+        return Some(Ping::Reply);
+    }
+    let roles = !settings.is_some_and(|s| s.suppress_roles) && m.mention_roles.iter().any(|r| my_roles.contains(r));
+    let everyone = m.mention_everyone && !settings.is_some_and(|s| s.suppress_everyone);
+    (roles || everyone).then_some(Ping::Group)
+}
+
+/// The messages among `msgs` that ping the user in channel `c`.
+fn pinging<'a>(c: &Channel, msgs: &'a [Message], me: Id, live: &LiveState) -> Vec<(Ping, &'a Message)> {
     let settings = live.settings(c.guild_id);
     let my_roles = c.guild_id.and_then(|g| live.guild(g)).map(|g| g.my_roles).unwrap_or_default();
+    msgs.iter().filter_map(|m| ping_of(m, me, settings.as_ref(), &my_roles).map(|p| (p, m))).collect()
+}
+
+fn pings(c: &Channel, msgs: &[Message], me: Id, live: &LiveState) -> Pings {
     let mut p = Pings::default();
-    for m in msgs {
-        if m.mentions.contains(&me) {
-            p.direct += 1;
-        } else if m.reply_to_author == Some(me) {
-            p.replies += 1;
+    for (kind, _) in pinging(c, msgs, me, live) {
+        match kind {
+            Ping::Direct => p.direct += 1,
+            Ping::Reply => p.replies += 1,
+            Ping::Group => p.group = true,
         }
-        let roles = !settings.as_ref().is_some_and(|s| s.suppress_roles)
-            && m.mention_roles.iter().any(|r| my_roles.contains(r));
-        let everyone = m.mention_everyone && !settings.as_ref().is_some_and(|s| s.suppress_everyone);
-        p.group |= roles || everyone;
     }
     p
+}
+
+/// Unread messages in hand for a channel: buffered ones plus inbox entries,
+/// newer than `last_acked`.
+fn in_hand(c: &Channel, live: &LiveState, mentions: &[Message]) -> (Vec<Message>, Vec<Message>) {
+    let acked = live.read_state(c.id).last_acked;
+    let is_new = |m: &Message| m.channel_id == c.id && acked.is_none_or(|a| m.id > a);
+    let buffered: Vec<Message> = live.recent(c.id).into_iter().filter(|m| is_new(m)).collect();
+    let mut all = buffered.clone();
+    for m in mentions.iter().filter(|m| is_new(m)) {
+        if !all.iter().any(|b| b.id == m.id) {
+            all.push(m.clone());
+        }
+    }
+    (buffered, all)
 }
 
 /// The pending channels, ordered DMs and group DMs first, then mentions and
@@ -140,14 +186,7 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
             continue;
         }
         let rs = live.read_state(c.id);
-        let is_new = |m: &&Message| m.channel_id == c.id && rs.last_acked.is_none_or(|a| m.id > a);
-        let buffered: Vec<Message> = live.recent(c.id).into_iter().filter(|m| is_new(&m)).collect();
-        let mut in_hand = buffered.clone();
-        for m in mentions.iter().filter(is_new) {
-            if !in_hand.iter().any(|b| b.id == m.id) {
-                in_hand.push(m.clone());
-            }
-        }
+        let (buffered, in_hand) = in_hand(&c, live, mentions);
         let p = pings(&c, &in_hand, me, live);
         let reason = if level == WatchLevel::Muted {
             match (p.direct, p.replies) {
@@ -192,11 +231,12 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
     Ok(found.into_iter().map(|(_, _, item)| item).collect())
 }
 
-/// `pending` plus the first unread messages of each entry. Never marks
-/// anything read.
+/// `pending` plus the first unread messages of each entry and, for mentions
+/// and replies, the pinging messages already in hand. Never marks anything
+/// read.
 pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
     let now = ctx.timer.now_ms();
-    let mentions = match ctx.api.recent_mentions(100, None).await {
+    let mentions: Vec<Message> = match ctx.api.recent_mentions(100, None).await {
         Ok(m) => m.into_iter().filter(|m| m.timestamp_ms >= now - MENTIONS_WINDOW_MS).collect(),
         Err(e) if e.halts() => return Err(e.into()),
         // Read states and the buffer still work without the inbox.
@@ -205,27 +245,39 @@ pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
             vec![]
         }
     };
-    let me = ctx.live.me().map(|u| u.id);
+    let Some(me) = ctx.live.me().map(|u| u.id) else { return Ok(vec![]) };
+    let (mut kept, mut calls) = (0, 0);
     let mut out = Vec::new();
-    for (i, item) in pending(&ctx.live, &ctx.store, &mentions, now)?.into_iter().enumerate() {
-        if i >= MAX_FETCH {
-            out.push(PendingEntry { item, messages: vec![], more_unread: true, error: None });
+    for item in pending(&ctx.live, &ctx.store, &mentions, now)? {
+        let acked = ctx.live.read_state(item.channel).last_acked;
+        // A channel with no read state must be fetched to know whether it's
+        // unread at all, so it's fetched even past the budget of kept entries.
+        let fetch = calls < MAX_CALLS && (kept < MAX_FETCH || acked.is_none());
+        if !fetch {
+            out.push(PendingEntry { item, messages: vec![], more_unread: true, pings: vec![], error: None });
             continue;
         }
-        let acked = ctx.live.read_state(item.channel).last_acked;
+        calls += 1;
         let page = match ctx.api.history(item.channel, None, acked, FIRST_UNREAD as u8 + 1).await {
             Ok(p) => p,
             Err(e) if e.halts() => return Err(e.into()),
             Err(e) => {
-                out.push(PendingEntry { item, messages: vec![], more_unread: true, error: Some(e.to_string()) });
+                out.push(PendingEntry {
+                    item,
+                    messages: vec![],
+                    more_unread: true,
+                    pings: vec![],
+                    error: Some(e.to_string()),
+                });
                 continue;
             }
         };
         // No read state at all (a DM never opened here or elsewhere): it's
         // unread only if the last message isn't the user's, as in Discord.
-        if acked.is_none() && page.first().is_some_and(|m| Some(m.author.id) == me) {
+        if acked.is_none() && page.first().is_some_and(|m| m.author.id == me) {
             continue;
         }
+        kept += 1;
         let more_unread = page.len() > FIRST_UNREAD;
         // Newest first. After `acked` these are the oldest unread: drop the
         // newest extra one. Without `acked` they're the newest: drop the oldest.
@@ -233,10 +285,34 @@ pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
             Some(_) => page.iter().skip(page.len().saturating_sub(FIRST_UNREAD)).collect(),
             None => page.iter().take(FIRST_UNREAD).collect(),
         };
+        let pings = match item.reason {
+            Reason::Mention | Reason::Reply => pings_outside(&ctx.live, &item, &mentions, &keep, me),
+            _ => vec![],
+        };
         let messages = keep.into_iter().rev().map(|m| render_message(m, &ctx.live)).collect();
-        out.push(PendingEntry { item, messages, more_unread, error: None });
+        out.push(PendingEntry { item, messages, more_unread, pings, error: None });
     }
     Ok(out)
+}
+
+/// The newest pinging messages in hand that `shown` doesn't include, oldest first.
+fn pings_outside(
+    live: &LiveState,
+    item: &PendingItem,
+    mentions: &[Message],
+    shown: &[&Message],
+    me: Id,
+) -> Vec<RenderedMessage> {
+    let Some(c) = live.channel(item.channel) else { return vec![] };
+    let (_, in_hand) = in_hand(&c, live, mentions);
+    let mut found: Vec<&Message> = pinging(&c, &in_hand, me, live)
+        .into_iter()
+        .map(|(_, m)| m)
+        .filter(|m| !shown.iter().any(|s| s.id == m.id))
+        .collect();
+    found.sort_by_key(|m| std::cmp::Reverse(m.id));
+    found.truncate(MAX_PINGS);
+    found.into_iter().rev().map(|m| render_message(m, live)).collect()
 }
 
 #[cfg(test)]

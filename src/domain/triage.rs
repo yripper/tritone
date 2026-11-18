@@ -56,9 +56,17 @@ pub fn unsnooze(ctx: &Ctx, channel: Id) -> Result<()> {
 /// Sets (or with `None` clears) the tritone watch level of a server or a
 /// channel; which one comes from the live model. Returns the kind.
 pub fn set_watch(ctx: &Ctx, target: Id, level: Option<WatchLevel>) -> Result<TargetKind> {
-    let kind = if ctx.live.guild(target).is_some() {
+    let (guild, channel) = (ctx.live.guild(target).is_some(), ctx.live.channel(target).is_some());
+    // Older servers' default channel has the server's own id, and watch
+    // levels are stored by id alone: a level here would apply to both.
+    if guild && channel {
+        return Err(Error::Invalid(format!(
+            "{target} is both a server and its default channel (same id): tritone can't set a watch level on it yet. Set it on the other channels, or mute it in Discord"
+        )));
+    }
+    let kind = if guild {
         TargetKind::Guild
-    } else if ctx.live.channel(target).is_some() {
+    } else if channel {
         TargetKind::Channel
     } else {
         return Err(Error::NotFound(target.to_string()));

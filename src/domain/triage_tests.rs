@@ -85,3 +85,13 @@ fn set_watch_infers_guild_or_channel() {
     assert_eq!(w.ctx.store.get_watch(Id(101)).unwrap(), None, "clear");
     assert!(matches!(set_watch(&w.ctx, Id(999), Some(WatchLevel::Full)), Err(Error::NotFound(_))));
 }
+
+#[test]
+fn set_watch_refuses_an_id_shared_by_server_and_channel() {
+    // Older servers' default channel has the server's id.
+    let general = Channel { name: Some("general".into()), ..text_channel(1, 1) };
+    let w = world(ready(ME, vec![guild(1)], vec![general, text_channel(102, 1)]));
+    let e = set_watch(&w.ctx, Id(1), Some(WatchLevel::Muted)).unwrap_err();
+    assert!(matches!(e, Error::Invalid(ref m) if m.contains("same id")), "{e}");
+    assert!(w.ctx.store.all_watch().unwrap().is_empty(), "nothing stored");
+}

@@ -311,3 +311,45 @@ async fn dm_without_read_state_pending_unless_last_is_mine() {
     assert_eq!(ids, vec![302], "D301's last message is mine: read");
     assert_eq!(entries[0].messages.len(), 2);
 }
+
+#[tokio::test]
+async fn dropped_dms_do_not_use_the_fetch_budget() {
+    let mut s = snap();
+    for n in 1..=17u64 {
+        s.channels.push(dm(400 + n, 2));
+        // No read state; the newest message is mine.
+        unread(&mut s, 400 + n, at(n as i64 * 100), None);
+    }
+    s.settings.push(guild_settings(MuteUntil::Forever, false));
+    unread(&mut s, 101, at(5_000), Some(at(9_000)));
+    let w = world(s);
+    for n in 1..=17u64 {
+        w.fake.put_history(Id(400 + n), vec![msg(at(n as i64 * 100), 400 + n, ME, "x")]);
+    }
+    w.fake.mentions.lock().unwrap().push(mention_me(at(5_000), 101));
+    w.fake.put_history(Id(101), vec![mention_me(at(5_000), 101)]);
+    let entries = get_pending(&w.ctx).await.unwrap();
+    let ids: Vec<u64> = entries.iter().map(|e| e.item.channel.0).collect();
+    assert_eq!(ids, vec![101], "every DM with my message last is read");
+    assert_eq!(entries[0].messages.len(), 1, "the mention still got its messages");
+}
+
+#[tokio::test]
+async fn mention_entry_carries_the_ping() {
+    let mut s = snap();
+    s.settings.push(guild_settings(MuteUntil::Forever, false));
+    let month = 30 * 86_400_000;
+    unread(&mut s, 101, at(1_000), Some(at(month)));
+    let w = world(s);
+    let old: Vec<Message> = (1..=30).map(|i| from_u2(at(month - i * 60_000), 101)).collect();
+    w.fake.put_history(Id(101), old);
+    w.fake.put_history(Id(101), vec![mention_me(at(1_000), 101)]);
+    w.fake.mentions.lock().unwrap().push(mention_me(at(1_000), 101));
+    let entries = get_pending(&w.ctx).await.unwrap();
+    let e = &entries[0];
+    assert_eq!(e.item.reason, Reason::Mention);
+    assert!(e.more_unread);
+    assert!(e.messages.iter().all(|m| m.id != at(1_000).to_string()), "the oldest unread don't reach it");
+    let pings: Vec<String> = e.pings.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(pings, vec![at(1_000).to_string()]);
+}

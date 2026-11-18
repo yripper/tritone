@@ -9,7 +9,7 @@ mod watch;
 
 pub use activity::ActivityRow;
 pub use voice::{OWN_MESSAGE_KEEP_MS, OwnMessageRow, VoiceEntry};
-pub use watch::{TargetKind, WatchLevel};
+pub use watch::{TargetKind, WatchLevel, WatchMap};
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};

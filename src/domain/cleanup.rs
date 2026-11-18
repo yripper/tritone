@@ -15,10 +15,11 @@ use crate::domain::clock::{GapRng, ThreadRng};
 use crate::domain::errors::{Error, Result};
 use crate::domain::live::{ConnState, LiveState};
 use crate::domain::paced_search::SearchPacer;
+use crate::domain::pending::explicit_watch;
 use crate::domain::send_queue::halt_everything;
 use crate::domain::voice::observe_own;
 use crate::mcp::state::Ctx;
-use crate::store::{Store, WatchLevel};
+use crate::store::{Store, WatchLevel, WatchMap};
 
 const DAY_MS: i64 = 86_400_000;
 /// Leave a server with no post in this long (and no full-watch channel).
@@ -103,16 +104,16 @@ fn date(ms: i64) -> String {
 }
 
 /// A server or one of its channels is set to full watch in tritone.
-// TODO(watch v2): use the per-kind `WatchMap` once the keyed watch store lands.
-fn full_watch_in_guild(store: &Store, live: &LiveState, guild: Id) -> Result<bool> {
-    let watch = store.all_watch()?;
-    Ok(watch.iter().any(|(id, level)| {
-        *level == WatchLevel::Full && (*id == guild || live.channel(*id).is_some_and(|c| c.guild_id == Some(guild)))
-    }))
+fn full_watch_in_guild(watch: &WatchMap, live: &LiveState, guild: Id) -> bool {
+    watch.guilds.get(&guild) == Some(&WatchLevel::Full)
+        || watch.channels.iter().any(|(id, level)| {
+            *level == WatchLevel::Full && live.channel(*id).is_some_and(|c| c.guild_id == Some(guild))
+        })
 }
 
-fn channel_full_watch(store: &Store, channel: Id) -> Result<bool> {
-    Ok(store.get_watch(channel)? == Some(WatchLevel::Full))
+/// The channel's tritone level (its own, its parent's, its server's) is full.
+fn channel_full_watch(watch: &WatchMap, live: &LiveState, channel: Id) -> bool {
+    live.channel(channel).is_some_and(|c| explicit_watch(&c, watch) == Some(WatchLevel::Full))
 }
 
 /// Visible, non-category channels of a server with unread messages, newest first.
@@ -171,7 +172,14 @@ fn suggest(f: &Facts, now: i64) -> Option<Suggestion> {
     None
 }
 
-fn plan_items(store: &Store, live: &LiveState, f: &Facts, s: Option<Suggestion>, now: i64) -> Result<Vec<PlanItem>> {
+fn plan_items(
+    store: &Store,
+    live: &LiveState,
+    watch: &WatchMap,
+    f: &Facts,
+    s: Option<Suggestion>,
+    now: i64,
+) -> Result<Vec<PlanItem>> {
     let g = f.id;
     let mut items = Vec::new();
     match s {
@@ -190,7 +198,7 @@ fn plan_items(store: &Store, live: &LiveState, f: &Facts, s: Option<Suggestion>,
             if offered == CHANNEL_MUTE_SUGGESTIONS {
                 break;
             }
-            if mine.contains(c) || live.discord_muted(*c, now) || channel_full_watch(store, *c)? {
+            if mine.contains(c) || live.discord_muted(*c, now) || channel_full_watch(watch, live, *c) {
                 continue;
             }
             let name = live.channel(*c).and_then(|c| c.name).unwrap_or_else(|| "unknown-channel".into());
@@ -223,6 +231,7 @@ pub async fn cleanup_plan(ctx: &Ctx) -> Result<CleanupPlan> {
 pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<CleanupPlan> {
     let me = ctx.live.me().ok_or(Error::NotConnected)?.id;
     let now = ctx.timer.now_ms();
+    let watch = ctx.store.all_watch()?;
     let mut facts = Vec::new();
     for g in ctx.live.guilds() {
         let local = ctx.store.last_own_post_in_guild(g.id)?;
@@ -237,7 +246,7 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
             id: g.id,
             unread: unread_channels(&ctx.live, g.id),
             muted: ctx.live.settings(Some(g.id)).is_some_and(|s| s.muted.active(now)),
-            full_watch: full_watch_in_guild(&ctx.store, &ctx.live, g.id)?,
+            full_watch: full_watch_in_guild(&watch, &ctx.live, g.id),
             owner: g.owner_id == me,
             last_post,
             has_local: local.is_some(),
@@ -269,7 +278,7 @@ pub async fn cleanup_plan_with(ctx: &Ctx, pacer: &SearchPacer) -> Result<Cleanup
             full_watch: f.full_watch,
             owner: f.owner,
             suggestion: s,
-            items: plan_items(&ctx.store, &ctx.live, f, s, now)?,
+            items: plan_items(&ctx.store, &ctx.live, &watch, f, s, now)?,
         });
     }
     let rank = |s: &ServerEntry| match s.suggestion {

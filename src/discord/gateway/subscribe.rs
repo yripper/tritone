@@ -12,7 +12,8 @@ use std::collections::{HashMap, HashSet};
 use serde_json::{Value, json};
 
 use crate::discord::types::{Channel, ChannelKind, Id, ReadySnapshot};
-use crate::store::WatchLevel;
+use crate::domain::pending::explicit_watch;
+use crate::store::{WatchLevel, WatchMap};
 
 /// At most this many channels per guild in op 37. Each costs a member-list
 /// range, and a payload over 15 KiB closes the socket with 4002
@@ -76,21 +77,11 @@ pub(crate) fn subscribe_channels(channels: &[Channel], guild: Id, watched: &Hash
     picked.into_iter().take(MAX_SUBSCRIBED_CHANNELS).map(|c| c.id).collect()
 }
 
-/// Channels whose effective watch level is full: the channel's own level,
-/// else (for a thread) its parent's, else its guild's.
-pub(crate) fn full_watch_channels(channels: &[Channel], watch: &HashMap<Id, WatchLevel>) -> HashSet<Id> {
-    channels
-        .iter()
-        .filter(|c| {
-            let parent = if c.kind.is_thread() { c.parent_id } else { None };
-            let level = watch
-                .get(&c.id)
-                .or_else(|| parent.and_then(|p| watch.get(&p)))
-                .or_else(|| c.guild_id.and_then(|g| watch.get(&g)));
-            level == Some(&WatchLevel::Full)
-        })
-        .map(|c| c.id)
-        .collect()
+/// Channels set to full watch in tritone: the channel's own level, else (for
+/// a thread) its parent's, else its server's (`pending::explicit_watch`, the
+/// rule pending and listings use).
+pub(crate) fn full_watch_channels(channels: &[Channel], watch: &WatchMap) -> HashSet<Id> {
+    channels.iter().filter(|c| explicit_watch(c, watch) == Some(WatchLevel::Full)).map(|c| c.id).collect()
 }
 
 #[cfg(test)]

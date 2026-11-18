@@ -208,6 +208,7 @@ struct Harness {
     state: AppState,
     opener: Arc<FakeOpener>,
     server: Server,
+    timer: Arc<FakeTimer>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -233,13 +234,13 @@ async fn harness(token: Option<&str>) -> Harness {
     if let Some(t) = token {
         secrets.set(ACCOUNT_TOKEN, t).await.unwrap();
     }
-    let state = AppState::new(store, secrets, live, queue, config, timer);
+    let state = AppState::new(store, secrets, live, queue, config, timer.clone());
     let server = Server::start().await;
     let opener = Arc::new(FakeOpener::default());
     let fp = Arc::new(Fingerprint::for_this_machine());
     let gw = Gateway::new(state.clone(), opener.clone(), fp, server.url.clone()).with_timing(FAST);
     let task = tokio::spawn(gw.run());
-    Harness { state, opener, server, task }
+    Harness { state, opener, server, timer, task }
 }
 
 /// Real time, scaled down: backoff 20 ms doubling to 200 ms, 50–100 ms
@@ -583,6 +584,48 @@ async fn missed_messages_after_reidentify_subscribe_the_guild() {
     assert_eq!(subs.keys().collect::<Vec<_>>(), vec!["10"]);
     assert_eq!(subs["10"]["channels"], json!({"100": [[0, 99]]}));
     assert!(timeout(Duration::from_millis(300), p2.recv_op()).await.is_err(), "one op 37 only");
+}
+
+#[tokio::test]
+async fn downtime_before_a_zombie_is_noticed_is_not_a_miss() {
+    let h = harness(Some("tok-1")).await;
+    h.state.store.set_watch(Id(10), TargetKind::Guild, Some(WatchLevel::Full)).unwrap();
+    let mut p = h.server.accept().await;
+    p.hello(300).await;
+    assert_eq!(p.recv_op().await["op"], 2);
+    p.dispatch("READY", ready_json(&h.server, json!([guild_json(10, 100, id_at(T - 60_000))]))).await;
+    p.dispatch("MESSAGE_CREATE", message_json(id_at(T - 30_000), 100, 10)).await;
+    settle().await;
+    // The socket goes silent (a sleeping Mac): a minute passes before the
+    // missed heartbeat ack is noticed.
+    h.timer.advance(60_000);
+    assert_eq!(p.until_closed().await, Some(4000));
+
+    let mut p2 = h.server.accept().await;
+    p2.hello(41_250).await;
+    assert_eq!(p2.recv_op().await["op"], 6);
+    p2.send(json!({"op": 9, "d": false})).await;
+    let mut p3 = h.server.accept().await;
+    // Posted after the socket's last payload, before the drop was noticed:
+    // downtime, not a delivery miss.
+    p3.handshake(ready_json(&h.server, json!([guild_json(10, 100, id_at(T + 30_000))]))).await;
+    assert!(timeout(Duration::from_millis(300), p3.recv_op()).await.is_err(), "no op 37");
+}
+
+#[tokio::test]
+async fn identifies_that_never_reach_ready_halt_after_three() {
+    let h = harness(Some("tok-1")).await;
+    for _ in 0..3 {
+        let mut p = h.server.accept().await;
+        p.hello(41_250).await;
+        assert_eq!(p.recv_op().await["op"], 2);
+        p.send(json!({"op": 9, "d": false})).await;
+    }
+    assert!(h.server.no_connection_within(1_000).await, "no fourth identify");
+    assert_eq!(h.state.live.connection(), ConnState::Halted(DiscordError::SessionRefused));
+    let s = status(&h.state).await;
+    assert_eq!(s["connection"], "halted");
+    assert!(s["note"].as_str().unwrap().contains("restart tritone"));
 }
 
 #[tokio::test]

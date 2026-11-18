@@ -289,6 +289,10 @@ pub enum DiscordError {
     /// (e.g. 4010–4016): every re-identify would add a session.
     #[error("Discord closed the session (code {code}): restart tritone (pm2 restart tritone)")]
     GatewayClosed { code: u16 },
+    /// Identifies kept ending without READY (op 9 `false`, or the socket
+    /// dropped): retrying would add sessions and stay inside a rate limit.
+    #[error("Discord keeps refusing the session: restart tritone (pm2 restart tritone)")]
+    SessionRefused,
 }
 
 impl DiscordError {
@@ -301,6 +305,7 @@ impl DiscordError {
                 | DiscordError::Locked
                 | DiscordError::Blocked { .. }
                 | DiscordError::GatewayClosed { .. }
+                | DiscordError::SessionRefused
         )
     }
 
@@ -318,6 +323,7 @@ impl DiscordError {
             DiscordError::Api { .. } => "api",
             DiscordError::Http(_) => "http",
             DiscordError::GatewayClosed { .. } => "gateway_closed",
+            DiscordError::SessionRefused => "session_refused",
         }
     }
 }

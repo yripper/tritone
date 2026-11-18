@@ -1,0 +1,20 @@
+# build
+target/
+
+# secrets & local state — real state lives in ~/.tritone, never in the repo
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.db
+*.db-*
+data/
+.tritone/
+
+# logs & OS
+*.log
+logs/
+.DS_Store
+
+# local tooling
+.claude/settings.local.json

@@ -45,6 +45,12 @@ pub enum GatewayEvent {
         guild: Id,
         role: Id,
     },
+    /// THREAD_MEMBER_UPDATE / THREAD_MEMBERS_UPDATE for the user: joined or
+    /// left a thread.
+    ThreadMembership {
+        thread: Id,
+        joined: bool,
+    },
     GuildDelete(Id),
     SettingsUpdate(GuildSettings),
     /// The socket dropped; the gateway is reconnecting.
@@ -68,15 +74,22 @@ pub(crate) fn parse_dispatch(t: &str, d: &Value, me: Option<Id>) -> Vec<GatewayE
         }
         "CHANNEL_DELETE" | "THREAD_DELETE" => id_at(d, "id").map(GatewayEvent::ChannelDelete),
         // The threads the user can see in a guild: upsert each, so they exist
-        // as channels before their messages arrive.
+        // as channels before their messages arrive. `members` holds the
+        // user's own thread members: the threads they're in.
         "THREAD_LIST_SYNC" => {
             let guild = id_at(d, "guild_id");
+            let mine: Vec<Id> =
+                array_at(d, "members").iter().filter(|m| is_me(m, me)).filter_map(|m| id_at(m, "id")).collect();
             return array_at(d, "threads")
                 .iter()
                 .filter_map(|c| parse_channel(c, guild, &none))
-                .map(GatewayEvent::ChannelUpsert)
+                .map(|t| GatewayEvent::ChannelUpsert(Channel { joined: t.joined || mine.contains(&t.id), ..t }))
                 .collect();
         }
+        "THREAD_MEMBER_UPDATE" if is_me(d, me) => {
+            id_at(d, "id").map(|thread| GatewayEvent::ThreadMembership { thread, joined: true })
+        }
+        "THREAD_MEMBERS_UPDATE" => my_thread_membership(d, me),
         // `unavailable` is an outage: the guild is still there.
         "GUILD_CREATE" if !unavailable(d) => guild_create(d, me),
         "GUILD_UPDATE" => parse_guild(d, vec![]).map(|g| GatewayEvent::GuildUpdate(Box::new(g))),
@@ -107,6 +120,26 @@ fn guild_create(d: &Value, me: Option<Id>) -> Option<GatewayEvent> {
     let roles = me.and_then(|me| my_roles_in(array_at(d, "members"), me)).unwrap_or_default();
     let g = parse_guild(d, roles)?;
     Some(GatewayEvent::GuildUpsert(Box::new(g), guild_channels(d, gid)))
+}
+
+/// A thread member object for the user (an absent `user_id` means the user:
+/// Discord leaves it out of the user's own entries in some payloads).
+fn is_me(member: &Value, me: Option<Id>) -> bool {
+    id_at(member, "user_id").is_none_or(|u| Some(u) == me)
+}
+
+/// THREAD_MEMBERS_UPDATE when it adds or removes the user.
+/// https://docs.discord.food/gateway/gateway-events#thread-members-update
+fn my_thread_membership(d: &Value, me: Option<Id>) -> Option<GatewayEvent> {
+    let me = me?;
+    let thread = id_at(d, "id")?;
+    let added = array_at(d, "added_members").iter().any(|m| id_at(m, "user_id") == Some(me));
+    let removed = ids_at(d, "removed_member_ids").contains(&me);
+    match (added, removed) {
+        (true, false) => Some(GatewayEvent::ThreadMembership { thread, joined: true }),
+        (false, true) => Some(GatewayEvent::ThreadMembership { thread, joined: false }),
+        _ => None,
+    }
 }
 
 /// Only the user's own member update matters: it changes what they can see.

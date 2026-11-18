@@ -184,6 +184,11 @@ impl LiveState {
                     g.my_roles.retain(|r| *r != role);
                 }
             }
+            GatewayEvent::ThreadMembership { thread, joined } => {
+                if let Some(c) = self.lock().channels.get_mut(&thread) {
+                    c.joined = joined;
+                }
+            }
             GatewayEvent::GuildDelete(id) => {
                 let mut inner = self.lock();
                 inner.guilds.remove(&id);
@@ -450,8 +455,10 @@ impl Inner {
     /// Keeps the newest known `last_message_id`: an update may be older than
     /// a MESSAGE_CREATE already seen.
     fn upsert_channel(&mut self, mut c: Channel) {
-        let known = self.channels.get(&c.id).and_then(|old| old.last_message_id);
-        c.last_message_id = c.last_message_id.max(known);
+        let old = self.channels.get(&c.id);
+        c.last_message_id = c.last_message_id.max(old.and_then(|o| o.last_message_id));
+        // THREAD_UPDATE carries no membership: only ThreadMembership leaves.
+        c.joined |= old.is_some_and(|o| o.joined);
         for u in &c.recipients {
             self.users.insert(u.id, u.clone());
         }
@@ -526,6 +533,7 @@ fn new_channel_for(msg: &Message) -> Channel {
         last_message_id: None,
         overwrites: vec![],
         position: 0,
+        joined: false,
     }
 }
 

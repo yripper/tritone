@@ -37,6 +37,7 @@ pub fn text_channel(n: u64, guild: u64) -> Channel {
         last_message_id: None,
         overwrites: vec![],
         position: 0,
+        joined: false,
     }
 }
 
@@ -51,6 +52,7 @@ pub fn dm(n: u64, with: u64) -> Channel {
         last_message_id: None,
         overwrites: vec![],
         position: 0,
+        joined: false,
     }
 }
 

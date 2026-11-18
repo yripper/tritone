@@ -72,6 +72,54 @@ fn thread_list_sync_upserts_each_thread() {
 }
 
 #[test]
+fn thread_list_sync_members_mark_joined() {
+    // Op 37's `threads: true` syncs every active thread; `members` says
+    // which ones the user is in.
+    let d = json!({
+        "guild_id": "10",
+        "threads": [
+            {"id": "110", "type": 11, "parent_id": "100"},
+            {"id": "111", "type": 11, "parent_id": "100"}
+        ],
+        "members": [{"id": "110", "user_id": "1", "flags": 0}]
+    });
+    let joined: Vec<(Id, bool)> = parse_dispatch("THREAD_LIST_SYNC", &d, Some(ME))
+        .into_iter()
+        .map(|e| match e {
+            GatewayEvent::ChannelUpsert(c) => (c.id, c.joined),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(joined, vec![(Id(110), true), (Id(111), false)]);
+}
+
+#[test]
+fn thread_member_events_track_joined() {
+    let t = json!({"id": "110", "type": 11, "guild_id": "10", "parent_id": "100", "name": "T110"});
+    let mut added = t.clone();
+    added["member"] = json!({"id": "110", "user_id": "1", "flags": 0});
+    assert!(matches!(one("THREAD_CREATE", added), GatewayEvent::ChannelUpsert(c) if c.joined));
+    let mut created = t.clone();
+    created["newly_created"] = json!(true);
+    assert!(matches!(one("THREAD_CREATE", created), GatewayEvent::ChannelUpsert(c) if !c.joined));
+
+    let me = json!({"id": "110", "user_id": "1", "guild_id": "10", "flags": 0});
+    let joined = |t: &str, d: Value| match one(t, d) {
+        GatewayEvent::ThreadMembership { thread: Id(110), joined } => joined,
+        other => panic!("unexpected {other:?}"),
+    };
+    assert!(joined("THREAD_MEMBER_UPDATE", me));
+    let removed = json!({"id": "110", "guild_id": "10", "member_count": 3, "removed_member_ids": ["1"]});
+    assert!(!joined("THREAD_MEMBERS_UPDATE", removed));
+    let added_me =
+        json!({"id": "110", "guild_id": "10", "member_count": 4, "added_members": [{"id": "110", "user_id": "1"}]});
+    assert!(joined("THREAD_MEMBERS_UPDATE", added_me));
+    let others = json!({"id": "110", "guild_id": "10", "member_count": 4,
+        "added_members": [{"id": "110", "user_id": "2"}], "removed_member_ids": ["3"]});
+    assert!(parse_dispatch("THREAD_MEMBERS_UPDATE", &others, Some(ME)).is_empty(), "other people's membership");
+}
+
+#[test]
 fn guild_create_carries_channels_threads_and_my_roles() {
     let d = json!({
         "id": "10", "name": "G010", "owner_id": "999", "roles": [{"id": "10", "permissions": "1024"}],

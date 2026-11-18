@@ -129,6 +129,9 @@ pub(crate) fn parse_channel(v: &Value) -> Option<Channel> {
         last_message_id: field_id(v, "last_message_id"),
         overwrites: array(v, "permission_overwrites").iter().filter_map(overwrite).collect(),
         position: v.get("position").and_then(Value::as_i64).unwrap_or(0) as i32,
+        // A thread object carries the user's thread member when they're in
+        // it (THREAD_CREATE on being added, REST thread objects).
+        joined: v.get("member").is_some_and(Value::is_object),
     })
 }
 

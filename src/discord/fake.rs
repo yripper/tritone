@@ -212,6 +212,8 @@ impl DiscordApi for FakeDiscord {
             last_message_id: None,
             overwrites: vec![],
             position: 0,
+            // The creator is added to the thread.
+            joined: true,
         })
     }
 
@@ -231,6 +233,7 @@ impl DiscordApi for FakeDiscord {
             last_message_id: Some(nonce),
             overwrites: vec![],
             position: 0,
+            joined: true,
         };
         Ok((thread, msg))
     }

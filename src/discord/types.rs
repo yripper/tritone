@@ -176,6 +176,10 @@ pub struct Channel {
     pub last_message_id: Option<Id>,
     pub overwrites: Vec<Overwrite>,
     pub position: i32,
+    /// Threads only: the user is a member. User accounts see every active
+    /// thread in a channel they can view, but only joined ones count as
+    /// theirs (Discord's own unread UI ignores the rest).
+    pub joined: bool,
 }
 
 /// Per channel. A channel is unread when its `last_message_id` is past `last_acked`.

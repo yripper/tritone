@@ -94,11 +94,13 @@ fn watch_of(c: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> (Wa
     }
 }
 
-/// Channels that show up in pending and listings: no categories, and no
-/// server channel without a name (a phantom made by a message in a channel
-/// tritone never saw).
+/// Channels that show up in pending and listings: no categories, no server
+/// channel without a name (a phantom made by a message in a channel tritone
+/// never saw), and no thread the user hasn't joined (they see every active
+/// thread, like Discord, which doesn't count those as unread either). A
+/// direct mention or reply in one still reaches pending, as an unlisted ping.
 pub(crate) fn listable(c: &Channel) -> bool {
-    c.kind != ChannelKind::Category && (c.guild_id.is_none() || c.name.is_some())
+    c.kind != ChannelKind::Category && (c.guild_id.is_none() || c.name.is_some()) && (!c.kind.is_thread() || c.joined)
 }
 
 /// What the unread messages in hand (buffered, plus the mentions inbox) say.
@@ -237,7 +239,7 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
 }
 
 /// Label of an entry for a channel tritone doesn't hold (or holds without a
-/// name): an archived or unjoined thread, usually.
+/// name): an archived or unknown thread, usually.
 const UNLISTED: &str = "(thread or unknown channel)";
 
 /// Whether `pending` handles the channel itself, or it's unknown or nameless.
@@ -281,9 +283,14 @@ fn unlisted_pings(
         }
         let direct = msgs.iter().filter(|m| m.mentions.contains(&me)).count() as u32;
         let server = guild.and_then(|g| live.guild(g)).map_or_else(|| "unknown-server".to_string(), |g| g.name);
+        // An unjoined thread tritone knows has a real name.
+        let label = match live.channel(channel).filter(|c| c.name.is_some()) {
+            Some(c) => channel_label(&c, live),
+            None => format!("{server} › {UNLISTED}"),
+        };
         let item = PendingItem {
             channel,
-            label: format!("{server} › {UNLISTED}"),
+            label,
             reason: if direct > 0 { Reason::Mention } else { Reason::Reply },
             unread_count_hint: msgs.len() as u32,
             mention_count: msgs.len() as u32,

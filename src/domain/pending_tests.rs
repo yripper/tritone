@@ -16,6 +16,7 @@ fn snap() -> ReadySnapshot {
         kind: ChannelKind::PublicThread,
         parent_id: Some(Id(101)),
         name: Some("help-me".into()),
+        joined: true,
         ..text_channel(104, 1)
     };
     let group = Channel {
@@ -194,8 +195,45 @@ fn snoozed_hidden_until_time() {
     assert_eq!(pending(&w.ctx.live, &w.ctx.store, &[], NOW + 1_000).unwrap().len(), 1);
 }
 
+/// T105 "other-help" under C101: active, visible, but the user never joined it.
+fn add_unjoined_thread(w: &crate::domain::test_world::World) {
+    let thread = Channel {
+        kind: ChannelKind::PublicThread,
+        parent_id: Some(Id(101)),
+        name: Some("other-help".into()),
+        ..text_channel(105, 1)
+    };
+    w.ctx.live.apply(GatewayEvent::ChannelUpsert(thread), NOW);
+}
+
 #[test]
-fn unread_thread_is_pending() {
+fn unjoined_thread_new_message_not_pending() {
+    let w = world(snap());
+    add_unjoined_thread(&w);
+    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(from_u2(at(1_000), 105))), NOW);
+    assert!(w.ctx.live.is_unread(Id(105)));
+    // Not even with the whole server on full watch.
+    w.ctx.store.set_watch(Id(1), TargetKind::Guild, Some(WatchLevel::Full)).unwrap();
+    let items = pending(&w.ctx.live, &w.ctx.store, &[], NOW).unwrap();
+    assert!(items.iter().all(|i| i.channel != Id(105)), "{items:?}");
+    // Nor clutter in the listings.
+    let servers = crate::domain::reading::list_servers(&w.ctx.live, &w.ctx.store, NOW, false).unwrap();
+    assert_eq!(servers.iter().find(|s| s.id == Id(1)).unwrap().unread_channels, 0);
+}
+
+#[test]
+fn mention_in_unjoined_thread_still_pending() {
+    let w = world(snap());
+    add_unjoined_thread(&w);
+    let ping = mention_me(at(1_000), 105);
+    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(ping.clone())), NOW);
+    let items = pending(&w.ctx.live, &w.ctx.store, &[ping], NOW).unwrap();
+    assert_eq!(reasons(&items), vec![(105, Reason::Mention)]);
+    assert_eq!(items[0].label, "G001 › #C101 › other-help");
+}
+
+#[test]
+fn joined_thread_unread_is_pending() {
     let mut s = snap();
     unread(&mut s, 104, at(1_000), Some(at(5_000)));
     let w = world(s);

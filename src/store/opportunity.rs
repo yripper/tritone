@@ -16,6 +16,9 @@ pub enum OpportunityStatus {
     Answered,
     /// The message is gone or out of reach.
     Gone,
+    /// A newer message in the same thread took its place (one open
+    /// `my_thread` row per thread).
+    Superseded,
 }
 
 impl OpportunityStatus {
@@ -25,6 +28,7 @@ impl OpportunityStatus {
             OpportunityStatus::Dismissed => "dismissed",
             OpportunityStatus::Answered => "answered",
             OpportunityStatus::Gone => "gone",
+            OpportunityStatus::Superseded => "superseded",
         }
     }
 
@@ -34,6 +38,7 @@ impl OpportunityStatus {
             "dismissed" => OpportunityStatus::Dismissed,
             "answered" => OpportunityStatus::Answered,
             "gone" => OpportunityStatus::Gone,
+            "superseded" => OpportunityStatus::Superseded,
             other => bail!("unknown opportunity status in db: {other}"),
         })
     }
@@ -130,6 +135,29 @@ impl Store {
             params![message_id.to_string(), now_ms],
         )?;
         Ok(n == 1)
+    }
+
+    /// The user wrote `own` in `channel`: every open row there for an older
+    /// message is answered, reply-quote or not. Returns how many.
+    pub fn opportunities_answered_before(&self, channel: Id, own: Id, now_ms: i64) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE opportunity SET status = 'answered', updated_at = ?3
+             WHERE channel_id = ?1 AND status = 'open' AND CAST(message_id AS INTEGER) < CAST(?2 AS INTEGER)",
+            params![channel.to_string(), own.to_string(), now_ms],
+        )?)
+    }
+
+    /// Keeps only the newest open `my_thread` row in `channel`; older ones
+    /// are superseded. Returns how many.
+    pub fn keep_newest_my_thread(&self, channel: Id, now_ms: i64) -> Result<usize> {
+        Ok(self.conn().execute(
+            "UPDATE opportunity SET status = 'superseded', updated_at = ?2
+             WHERE channel_id = ?1 AND rule = 'my_thread' AND status = 'open'
+               AND CAST(message_id AS INTEGER) < (
+                   SELECT MAX(CAST(message_id AS INTEGER)) FROM opportunity
+                   WHERE channel_id = ?1 AND rule = 'my_thread' AND status = 'open')",
+            params![channel.to_string(), now_ms],
+        )?)
     }
 
     /// The user wrote in this channel (a thread), per `own_message` or the contribution log.

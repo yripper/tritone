@@ -302,3 +302,39 @@ async fn scanner_task_stores_hits_from_live_events() {
     handle.abort();
     assert_eq!(rule_of(&r, &m).as_deref(), Some("question"));
 }
+
+#[tokio::test]
+async fn a_busy_thread_keeps_one_open_row() {
+    let r = rig();
+    arrive(&r, &gmsg(90, 150, ME, "here is my take"));
+    let others: Vec<Message> = (0..5).map(|i| gmsg(80 - i, 150, 2 + i as u64, "more chat")).collect();
+    for m in &others {
+        arrive(&r, m);
+    }
+    let newest = others.last().unwrap();
+    assert_eq!(ids(&get_opportunities(&r.ctx, 15).await.unwrap()), [newest.id], "only the thread's newest");
+    let first = r.ctx.store.opportunity(others[0].id).unwrap().unwrap();
+    assert_eq!(first.status, OpportunityStatus::Superseded);
+}
+
+#[tokio::test]
+async fn my_message_closes_older_rows_in_that_channel() {
+    let r = rig();
+    let q = gmsg(60, 100, 2, "how do I do this?");
+    let t = gmsg(55, 100, 3, "rust is neat");
+    arrive(&r, &gmsg(90, 150, ME, "my take"));
+    let in_thread = gmsg(50, 150, 4, "and then?");
+    arrive(&r, &q);
+    arrive(&r, &t);
+    arrive(&r, &in_thread);
+    // Written in a Discord app, no reply-quote.
+    arrive(&r, &gmsg(45, 100, ME, "you can do it like this"));
+    let later = gmsg(40, 100, 5, "why does it fail?");
+    arrive(&r, &later);
+
+    let status = |m: &Message| r.ctx.store.opportunity(m.id).unwrap().unwrap().status;
+    assert_eq!((status(&q), status(&t)), (OpportunityStatus::Answered, OpportunityStatus::Answered));
+    assert_eq!(status(&later), OpportunityStatus::Open, "newer than my message");
+    assert_eq!(status(&in_thread), OpportunityStatus::Open, "another channel");
+    assert_eq!(ids(&get_opportunities(&r.ctx, 15).await.unwrap()), [later.id, in_thread.id]);
+}

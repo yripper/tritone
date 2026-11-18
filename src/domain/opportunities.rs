@@ -128,10 +128,12 @@ pub fn full_watch(c: &Channel, watch: &WatchMap) -> bool {
 }
 
 /// Handles one live message:
-/// - the user's own: recorded in `own_message` (ids and time), and a reply
-///   answers the opportunity it replies to;
+/// - the user's own: recorded in `own_message` (ids and time); it answers
+///   the opportunity it replies to and every open one in that channel for an
+///   older message (the user has spoken there since, quote or not);
 /// - someone else's, in a full-watch server channel: stored as an open
-///   opportunity when a rule matches.
+///   opportunity when a rule matches. A thread keeps one open `my_thread`
+///   row, its newest, so one busy thread can't fill the list.
 pub fn scan_message(
     store: &Store,
     live: &LiveState,
@@ -149,6 +151,7 @@ pub fn scan_message(
         if let Some(r) = msg.reply_to {
             store.opportunity_answered(r, at)?;
         }
+        store.opportunities_answered_before(msg.channel_id, msg.id, at)?;
         return Ok(());
     }
     let (Some(guild), Some(channel), Some(me)) = (guild, channel, live.me()) else { return Ok(()) };
@@ -156,6 +159,7 @@ pub fn scan_message(
         return Ok(());
     }
     if let Some(rule) = match_rules(msg, live, store, topics, me.id)? {
+        let my_thread = rule == Rule::MyThread;
         store.add_opportunity(&OpportunityRow {
             message_id: msg.id,
             channel_id: msg.channel_id,
@@ -165,6 +169,9 @@ pub fn scan_message(
             status: OpportunityStatus::Open,
             updated_at: at,
         })?;
+        if my_thread && channel.kind.is_thread() {
+            store.keep_newest_my_thread(msg.channel_id, at)?;
+        }
     }
     Ok(())
 }

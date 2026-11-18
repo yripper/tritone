@@ -30,10 +30,11 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 - `ActivityRow { message_id, guild_id, channel_id, created_at, kind, is_reply, via_tritone }` (`src/store/activity.rs:11`).
 - `record_activity(&row) -> bool` (`src/store/activity.rs:43`): insert-or-ignore, true when inserted. `mark_sent_via_tritone(id) -> bool` (`src/store/activity.rs:63`): false when there's no row yet. `set_activity_kind(id, kind)` (`src/store/activity.rs:72`). `activity_between(from_ms, to_ms)` (`src/store/activity.rs:79`): `from <= created_at < to`, newest first.
 
-- Opportunities (`src/store/opportunity.rs`): `OpportunityStatus { Open, Dismissed, Answered, Gone }` (`:12`), `OpportunityRow { message_id, channel_id, guild_id, rule, created_at, status, updated_at }` (`:43`).
-  - `add_opportunity(&row) -> bool` (`src/store/opportunity.rs:78`): insert-or-ignore, so the first rule wins and a dismissed one never reopens. `opportunity(id)` (`:94`). `open_opportunities(since_ms)` (`:106`): newest first.
-  - `set_opportunity_status(id, status, now_ms) -> bool` (`src/store/opportunity.rs:117`); `opportunity_answered(id, now_ms) -> bool` (`:127`) changes only an open row.
-  - `wrote_in(channel)` and `is_own_message(id)` (`src/store/opportunity.rs:136`, `:146`): from `own_message` and `activity` together.
+- Opportunities (`src/store/opportunity.rs`): `OpportunityStatus { Open, Dismissed, Answered, Gone, Superseded }` (`:12`), `OpportunityRow { message_id, channel_id, guild_id, rule, created_at, status, updated_at }` (`:48`).
+  - `add_opportunity(&row) -> bool` (`src/store/opportunity.rs:83`): insert-or-ignore, so the first rule wins and a dismissed one never reopens. `opportunity(id)` (`:99`). `open_opportunities(since_ms)` (`:111`): newest first.
+  - `set_opportunity_status(id, status, now_ms) -> bool` (`src/store/opportunity.rs:122`); `opportunity_answered(id, now_ms) -> bool` (`:132`) changes only an open row.
+  - `opportunities_answered_before(channel, own, now_ms)` (`src/store/opportunity.rs:142`): every open row in the channel for a message older than `own` becomes `answered`. `keep_newest_my_thread(channel, now_ms)` (`:152`): open `my_thread` rows in the channel other than the newest become `superseded`. Both compare ids as integers (`CAST(message_id AS INTEGER)`), not as text.
+  - `wrote_in(channel)` and `is_own_message(id)` (`src/store/opportunity.rs:164`, `:174`): from `own_message` and `activity` together.
 - Voice (`src/store/voice.rs`), times in Unix ms:
   - `profile(category)`, `save_profile(category, body, now_ms)` (replaces), `profile_dates()` (no bodies) (`src/store/voice.rs:49`, `:53`, `:62`); `notes(channel)`, `save_notes(channel, body, now_ms)` (`:69`, `:73`).
   - `category(target)`, `set_category(target, category)`, `targets_in_category(category)` (`src/store/voice.rs:89`, `:96`, `:105`). `target_id` is a channel or a server id.

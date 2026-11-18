@@ -19,7 +19,7 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 ## Public surface
 
 - `spawn(state: AppState) -> JoinHandle<()>` (`src/discord/gateway/mod.rs:45`): runs for the daemon's lifetime. Called from `cli::daemon::start`.
-- `GatewayEvent` (`src/discord/gateway/events.rs`), re-exported as `crate::discord::gateway::GatewayEvent`. This module adds `RoleUpsert { guild, role }` (`src/discord/gateway/events.rs:39`) and `RoleDelete { guild, role }` (`src/discord/gateway/events.rs:44`) for GUILD_ROLE_*; `LiveState` applies them (`src/domain/live.rs:170`).
+- `GatewayEvent` (`src/discord/gateway/events.rs`), re-exported as `crate::discord::gateway::GatewayEvent`. This module adds `RoleUpsert { guild, role }` (`src/discord/gateway/events.rs:39`) and `RoleDelete { guild, role }` (`src/discord/gateway/events.rs:44`) for GUILD_ROLE_*; `LiveState` applies them (`src/domain/live.rs:175`).
 
 ## Key methods
 

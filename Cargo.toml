@@ -10,19 +10,32 @@ publish = false
 anyhow = "1"
 async-trait = "0.1"
 axum = "0.8"
+base64 = "0.23"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive"] }
+cookie_store = "0.22"
+flate2 = "1"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+iana-time-zone = "0.1"
+qrcode = "0.14"
 rand = "0.9"
 rmcp = { version = "3.8.0", features = ["server", "macros", "transport-streamable-http-server"] }
 rpassword = "7"
+rsa = "0.9"
 rusqlite = { version = "0.41", features = ["bundled"] }
 schemars = "1"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+sys-locale = "0.3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt", "macros", "net", "time", "process", "io-util", "signal", "sync"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+wreq = { version = "0.16.3", features = ["cookies", "gzip", "brotli", "deflate", "zstd"] }
+wreq-util = "0.2.1"
 
 [dev-dependencies]
 tempfile = "3"

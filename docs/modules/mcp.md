@@ -36,4 +36,4 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - `AppState.api` is a `std::sync::RwLock` (so `ctx()` is sync); never hold it across an await.
 
 ## Testing
-`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard; `run` refusing until the client is set; the instructions and style guide.
+`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, and the login wake-up); `run` refusing until the client is set and while halted; the instructions and style guide.

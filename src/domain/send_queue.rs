@@ -7,7 +7,8 @@
 //! Text lives only in memory and is dropped when the job finishes; a restart
 //! drops unsent jobs. The only automatic retry is one after a rate limit,
 //! after its Retry-After and with the same nonce, so Discord can't
-//! double-post. A halting error (CAPTCHA, locked account, edge block, dead
+//! double-post; writes without a nonce (thread creation, forum posts,
+//! reactions) are never retried. A halting error (CAPTCHA, locked account, edge block, dead
 //! token) fails that job, pauses the queue with the other jobs still queued,
 //! and halts all of tritone through `LiveState`. Only `resume` (the user's
 //! explicit "continue") lifts it.
@@ -294,6 +295,18 @@ fn view(j: &Job, eta: Option<i64>, now: i64) -> JobView {
         sent_at: j.sent_at_ms.map(rfc3339_ms),
         error: j.error.clone(),
         ack_error: j.ack_error.clone(),
+    }
+}
+
+/// Whether a retry can only re-send a nonce'd message, which Discord
+/// delivers once: a Send, or a thread whose creation already succeeded (only
+/// its first message is left). Thread creation, forum posts and reactions
+/// carry no nonce, so retrying them could duplicate the write.
+fn nonce_protected(j: &Job) -> bool {
+    match j.what {
+        "message" => true,
+        "thread" => j.thread.is_some(),
+        _ => false,
     }
 }
 
@@ -606,13 +619,18 @@ impl SendQueue {
         }
         let now = self.timer.now_ms();
         self.update(id, |s, j| match &e {
-            // Retry-After is the only signal that a retry is safe.
-            DiscordError::RateLimited { retry_after_s } if !j.retried => {
+            DiscordError::RateLimited { retry_after_s } => {
+                // Every later write waits out the Retry-After too.
                 s.paused_until_ms = Some(now + (*retry_after_s).min(RATE_LIMIT_MAX_SECS) as i64 * 1000);
-                j.retried = true;
-                j.status = JobStatus::Queued;
+                if j.retried {
+                    fail(j, format!("{e} (twice; not retried again)"));
+                } else if !nonce_protected(j) {
+                    fail(j, format!("{e} (not retried: Discord can't deduplicate this kind of write)"));
+                } else {
+                    j.retried = true;
+                    j.status = JobStatus::Queued;
+                }
             }
-            DiscordError::RateLimited { .. } => fail(j, format!("{e} (twice; not retried again)")),
             other => {
                 let reason = match j.thread {
                     Some(t) if j.what == "thread" => {

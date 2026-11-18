@@ -361,6 +361,38 @@ async fn thread_is_not_created_twice_on_a_retry() {
 }
 
 #[tokio::test]
+async fn forum_post_not_retried() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("create_forum_post", DiscordError::RateLimited { retry_after_s: 30 });
+    r.q.enqueue(JobSpec::ForumPost { forum: FORUM, name: "Title".into(), content: "body".into() }).unwrap();
+    r.q.enqueue(send("next")).unwrap();
+    drain(&r.q).await;
+    let posts = r.api.times_of(|c| matches!(c, Call::CreateForumPost { .. }));
+    assert_eq!(posts.len(), 1, "the post carries no nonce: never retried");
+    let j = job(&r.q, 1);
+    assert_eq!(j.status, JobStatus::Failed);
+    assert!(j.error.unwrap().contains("not retried"));
+    assert!(r.api.times_of(is_send)[0] - posts[0] >= 30_000, "the next write still waits Retry-After");
+    assert_eq!(job(&r.q, 2).status, JobStatus::Sent);
+}
+
+#[tokio::test]
+async fn reaction_and_thread_creation_not_retried() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("react", DiscordError::RateLimited { retry_after_s: 1 });
+    r.api.fail_on("create_thread", DiscordError::RateLimited { retry_after_s: 1 });
+    r.q.enqueue(JobSpec::React { channel: CH, message: Id(5), emoji: "x".into() }).unwrap();
+    r.q.enqueue(JobSpec::Thread { channel: CH, from_message: None, name: "T".into(), content: Some("hi".into()) })
+        .unwrap();
+    drain(&r.q).await;
+    let calls = r.api.calls();
+    assert_eq!(calls.iter().filter(|c| matches!(c, Call::React { .. })).count(), 1);
+    assert_eq!(calls.iter().filter(|c| matches!(c, Call::CreateThread { .. })).count(), 1);
+    assert!(!calls.iter().any(is_send), "no thread, so no message");
+    assert_eq!((job(&r.q, 1).status, job(&r.q, 2).status), (JobStatus::Failed, JobStatus::Failed));
+}
+
+#[tokio::test]
 async fn forum_post_types_then_posts_with_a_nonce() {
     let r = rig(&[20_000]);
     r.q.enqueue(JobSpec::ForumPost { forum: FORUM, name: "Title".into(), content: "body".into() }).unwrap();

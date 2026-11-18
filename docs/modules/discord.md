@@ -13,9 +13,10 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `src/discord/fingerprint.rs`: `Fingerprint` (super-properties, REST and WebSocket headers), the build-number scrape, the installation id.
 - `src/discord/transport.rs`: `http_client` (wreq + Chrome emulation + cookie jar), `ws_connect`, `CookieJar`, `ChromeIdentity`.
 - `src/discord/http.rs`: `HttpDiscord`, the real `DiscordApi` (REST over the wreq client), and `rebuild_api`.
+- `src/discord/login.rs`: the remote-auth QR login and `validate_pasted`.
 - `src/discord/rate.rs`: `Pacer` (one request in flight, gaps, 429 cooldown).
 - `src/discord/parse.rs`: Discord JSON to the model (`parse_message`, `parse_user`, `parse_channel`), shared by REST and the gateway.
-- Tests: `src/discord/http_tests.rs` (wiremock), `src/discord/parse_tests.rs`, `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
+- Tests: `src/discord/http_tests.rs` (wiremock), `src/discord/login_tests.rs` (a local remote-auth WebSocket server plus wiremock), `src/discord/parse_tests.rs`, `src/discord/types_tests.rs`, `src/discord/fake_tests.rs`, `src/discord/fingerprint_tests.rs`, `src/discord/transport_tests.rs`.
 
 ## Public surface
 - `Id(pub u64)` (`src/discord/types.rs:16`): `Copy + Eq + Hash + Ord + Default`. Serde writes a decimal string and reads a string or a number; `Display`/`FromStr`; `JsonSchema` (a digit string), so tool arguments can take it.
@@ -57,6 +58,17 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
   - `set_mute` (`src/discord/http.rs:485`): `PATCH /users/@me/guilds/{g|@me}/settings`; guild `{muted, mute_config}`, channel `{channel_overrides:{"<c>":{muted, mute_config}}}` (a map here, an array in READY). `mute_config` is `{end_time:null, selected_time_window:-1}` when muting, `null` when unmuting.
   - `user` (`src/discord/http.rs:499`): `GET /users/{u}/profile?with_mutual_guilds=false`, reads `.user`.
 - `rebuild_api(jar, secrets, fp, live, token)` (`src/discord/http.rs:511`): `jar.reload(secrets)`, a fresh `http_client(jar)`, an `HttpDiscord` on `API_BASE`. Returns the API and the client (the gateway's WebSocket uses the same client). The daemon calls it on the first connect and whenever a new login wakes it.
+
+## Login (`src/discord/login.rs`)
+Remote-auth v2, https://docs.discord.food/remote-authentication/desktop.
+- `qr_login(client, fp, show)` (`src/discord/login.rs:71`) → the token. `qr_login_with(.., &LoginEndpoints, KeySource)` (`src/discord/login.rs:80`) takes the endpoints (`REMOTE_AUTH_URL` = `wss://remote-auth-gateway.discord.gg/?v=2`, the API root) and the RSA key source, so tests use local servers and one cached key.
+- Before the socket: unauthenticated `GET {api}/experiments` with `rest_headers(false)`; its `fingerprint` becomes `X-Fingerprint` on the ticket exchange (`fetch_x_fingerprint`, `src/discord/login.rs:115`; https://docs.discord.food/authentication#fingerprints). A failure is tolerated.
+- One session (`session`, `src/discord/login.rs:145`): a fresh RSA-2048 key; `ws_connect` with `fp.ws_headers()` (carries `Origin: https://discord.com`, which the gateway requires); `hello` → heartbeat every `heartbeat_interval` and `init {encoded_public_key: base64(SPKI DER)}`; `nonce_proof {encrypted_nonce}` → OAEP-SHA256 decrypt → `{op:"nonce_proof", nonce: base64url-no-pad}` (`nonce_proof`, `src/discord/login.rs:134`); `pending_remote_init {fingerprint}` must equal base64url-no-pad SHA-256 of our SPKI, else the socket closes and the login fails without showing a QR; then `show("https://discord.com/ra/<fingerprint>")`; `pending_ticket` is only logged as "scanned" (its payload is never decrypted); `pending_login {ticket}` ends the session; `cancel` → `Cancelled`.
+- Close 4003 (expired), a missed heartbeat ack, or `timeout_ms` + 10 s without a ticket → a new session with a new key, 1 s later, up to 3 times (`REGENERATIONS`), then `Expired`. Any other close code → `Protocol`.
+- Ticket exchange (`exchange_ticket`, `src/discord/login.rs:243`): `POST {api}/users/@me/remote-auth/login {"ticket"}`, no `Authorization`, `rest_headers(true)` plus `Content-Type` and `X-Fingerprint`, same client (same cookies). A body with `captcha_key` → `Captcha` (never solved or retried); other non-2xx → `Http`; `encrypted_token` → OAEP-SHA256 decrypt → the token.
+- `LoginError` (`src/discord/login.rs:33`): `Captcha`, `Cancelled`, `Expired`, `InvalidToken(reason)`, `Protocol`, `Http`.
+- `validate_pasted(raw)` (`src/discord/login.rs:288`): trims whitespace and one pair of `"` or `'`; 16..=2048 bytes; no `Bot `/`Bearer ` prefix; graphic ASCII without quotes (rules as Serein's `crates/client-core/src/auth.rs`).
+- Never logged: the ticket, the token, the user payload.
 
 ## Pacer (`src/discord/rate.rs`)
 - `Pacer::turn(write)` (`src/discord/rate.rs:50`): one turn at a time (a tokio mutex held for the request). Waits until 250 ms (`MIN_GAP`) after the last request ended, and 500 ms (`WRITE_GAP`) after the last write. During a cooldown it returns `Err(seconds left)` at once and the caller answers `RateLimited` without a request.
@@ -100,7 +112,7 @@ Identity: Discord web in Chrome. Fields: `user_agent`, `browser_version`, `os`, 
 - `FakeDiscord::default()` posts as `Id(1)` / `U001`.
 
 ## Dependencies
-serde, serde_json (`preserve_order`), schemars, thiserror, async-trait, wreq 0.16.3, wreq-util 0.2.1, tokio-tungstenite 0.30, cookie_store 0.22, url, base64, sys-locale, iana-time-zone. Building wreq compiles BoringSSL: cmake, a C/C++ compiler and libclang (see README).
+rsa 0.9 (OAEP-SHA256, `rsa::rand_core::OsRng`), sha2, futures-util, serde, serde_json (`preserve_order`), schemars, thiserror, async-trait, wreq 0.16.3, wreq-util 0.2.1, tokio-tungstenite 0.30, cookie_store 0.22, url, base64, sys-locale, iana-time-zone. Building wreq compiles BoringSSL: cmake, a C/C++ compiler and libclang (see README).
 
 ## Gotchas & invariants
 - Never log tokens, cookies or message text from here. `HttpDiscord` network errors are reduced to "timed out" / "could not connect" / "request failed" (wreq's text names the URL).

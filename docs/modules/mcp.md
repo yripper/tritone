@@ -9,13 +9,16 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - `src/mcp/server.rs`: `TritoneServer`, `tool_router()` (merges the group routers with `+`), `run`, `json`, and the `ServerHandler` impl.
 - `src/mcp/tools/`: one `#[tool_router(router = <group>_router, vis = "pub(crate)")] impl TritoneServer` per file: `status.rs`, `read.rs`, `triage.rs`, `write.rs`, `engage.rs`, `activity.rs`.
 - `src/mcp/state.rs`: `AppState`, `Ctx`.
-- `src/mcp/http.rs`: `guard_router` (Host + bearer), `app` (the guarded `/mcp` service) and `serve` (graceful shutdown on SIGTERM/SIGINT).
+- `src/mcp/http.rs`: `guard_router` (Host + bearer), `app` (the guarded `/mcp` service and `POST /login-notify`) and `serve` (graceful shutdown on SIGTERM/SIGINT).
 - `src/mcp/instructions.rs`: `BASE_INSTRUCTIONS`, `build_instructions`, `read_style_guide`, `current_instructions`.
 - Tests: `src/mcp/mcp_tests.rs`, `src/mcp/http_tests.rs`.
 
 ## Tools
 - `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `LiveState::try_login_with` accepts (not the rejected one, nor one already tried) wakes the gateway through `login_notify` and reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
 - The other groups are empty so far.
+
+## Other routes
+- `POST /login-notify` (`src/mcp/http.rs:65`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: a keyring token that `try_login_with` accepts → `notify_one` on `login_notify`, 200; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
 
 ## Key methods
 - `TritoneServer::tool_router` (`src/mcp/server.rs:38`): `status_router + read_router + triage_router + write_router + engage_router + activity_router`. Built once in `new` and kept in the struct.
@@ -37,4 +40,4 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - Halt contract (`src/mcp/state.rs:7`): a dead token calls `live.reject_token(token)`, any other halting error `live.halt(e)`; `ctx()` refuses while halted, across gateway reconnects.
 
 ## Testing
-`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.
+`cargo test mcp`: `/login-notify` (wakes on a new token, not on the rejected one or none, guarded); the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.

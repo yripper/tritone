@@ -297,7 +297,13 @@ impl Gateway {
                 backoff.reset();
             }
             let wait = match ended.next {
-                Next::Halt | Next::NewToken(_) => return ended.next,
+                // The socket is gone: never leave the model looking ready, or
+                // lifting the halt (the queue's resume) would let writes through.
+                Next::Halt => {
+                    self.apply(GatewayEvent::Disconnected);
+                    return Next::Halt;
+                }
+                Next::NewToken(_) => return ended.next,
                 Next::Resume if resume_attempts < MAX_RESUME_ATTEMPTS => backoff.delay(),
                 Next::Resume => {
                     tracing::info!(attempts = resume_attempts, "resume keeps failing; identifying fresh");
@@ -404,7 +410,7 @@ impl Gateway {
                 Next::Halt
             }
             Some(c) if is_fatal(c) => {
-                self.state.live.halt(DiscordError::Api { status: 0, code: Some(u32::from(c)) });
+                self.state.live.halt(DiscordError::GatewayClosed { code: c });
                 Next::Halt
             }
             Some(4007 | 4009) => Next::Identify(self.identify_delay()),

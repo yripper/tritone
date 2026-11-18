@@ -411,11 +411,18 @@ async fn close_4004_halts_without_reidentify() {
 async fn fatal_close_codes_halt_without_retry() {
     let h = harness(Some("tok-1")).await;
     let mut p = h.server.accept().await;
-    p.hello(41_250).await;
-    p.recv_op().await;
+    p.handshake(ready_json(&h.server, json!([]))).await;
+    settle().await;
+    assert!(matches!(h.state.live.connection(), ConnState::Ready { .. }));
     p.close(4011).await;
     settle().await;
-    assert!(matches!(h.state.live.connection(), ConnState::Halted(DiscordError::Api { code: Some(4011), .. })));
+    assert_eq!(h.state.live.connection(), ConnState::Halted(DiscordError::GatewayClosed { code: 4011 }));
+    let s = status(&h.state).await;
+    assert_eq!(s["connection"], "halted");
+    assert!(s["note"].as_str().unwrap().contains("restart tritone"));
+    // Lifting the halt (e.g. the queue's resume) never makes a dead gateway look ready.
+    h.state.live.clear_halt();
+    assert!(!matches!(h.state.live.connection(), ConnState::Ready { .. }));
     assert!(h.server.no_connection_within(1_000).await);
 }
 

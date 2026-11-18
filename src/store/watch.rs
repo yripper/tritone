@@ -38,6 +38,7 @@ impl WatchLevel {
 }
 
 /// What a watch level is set on. A channel's level overrides its server's.
+/// Part of the key: an older server's default channel shares the server's id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TargetKind {
     Guild,
@@ -53,15 +54,26 @@ impl TargetKind {
     }
 }
 
+/// Every explicit level, split by kind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct WatchMap {
+    pub guilds: HashMap<Id, WatchLevel>,
+    pub channels: HashMap<Id, WatchLevel>,
+}
+
 fn parse_id(s: &str) -> Result<Id> {
     Ok(Id(s.parse().with_context(|| format!("bad id in db: {s}"))?))
 }
 
 impl Store {
-    pub fn get_watch(&self, target: Id) -> Result<Option<WatchLevel>> {
+    pub fn get_watch(&self, target: Id, kind: TargetKind) -> Result<Option<WatchLevel>> {
         let level: Option<String> = self
             .conn()
-            .query_row("SELECT level FROM watch WHERE target_id = ?1", [target.0.to_string()], |r| r.get(0))
+            .query_row(
+                "SELECT level FROM watch WHERE target_id = ?1 AND kind = ?2",
+                params![target.0.to_string(), kind.as_str()],
+                |r| r.get(0),
+            )
             .optional()?;
         level.as_deref().map(WatchLevel::parse).transpose()
     }
@@ -72,21 +84,32 @@ impl Store {
         match level {
             Some(l) => self.conn().execute(
                 "INSERT INTO watch (target_id, kind, level) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(target_id) DO UPDATE SET kind = excluded.kind, level = excluded.level",
+                 ON CONFLICT(target_id, kind) DO UPDATE SET level = excluded.level",
                 params![id, kind.as_str(), l.as_str()],
             )?,
-            None => self.conn().execute("DELETE FROM watch WHERE target_id = ?1", [id])?,
+            None => self
+                .conn()
+                .execute("DELETE FROM watch WHERE target_id = ?1 AND kind = ?2", params![id, kind.as_str()])?,
         };
         Ok(())
     }
 
-    /// Every explicit level, guilds and channels together (ids never collide).
-    pub fn all_watch(&self) -> Result<HashMap<Id, WatchLevel>> {
+    /// Every explicit level, servers and channels apart.
+    pub fn all_watch(&self) -> Result<WatchMap> {
         let conn = self.conn();
-        let mut stmt = conn.prepare("SELECT target_id, level FROM watch")?;
-        let rows: Vec<(String, String)> =
-            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        rows.iter().map(|(id, level)| Ok((parse_id(id)?, WatchLevel::parse(level)?))).collect()
+        let mut stmt = conn.prepare("SELECT target_id, kind, level FROM watch")?;
+        let rows: Vec<(String, String, String)> =
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+        let mut map = WatchMap::default();
+        for (id, kind, level) in rows {
+            let target = match kind.as_str() {
+                "guild" => &mut map.guilds,
+                "channel" => &mut map.channels,
+                other => bail!("unknown watch kind in db: {other}"),
+            };
+            target.insert(parse_id(&id)?, WatchLevel::parse(&level)?);
+        }
+        Ok(map)
     }
 
     /// Unix ms. `None` unsnoozes.

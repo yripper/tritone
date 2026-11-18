@@ -50,21 +50,23 @@ pub(crate) struct WatchArgs {
     pub level: WatchChoice,
 }
 
-/// Channel-shaped queries go to `resolve_channel`; a bare id is either kind;
-/// otherwise a server name, then a channel name.
-fn resolve_target(q: &str, live: &LiveState) -> DResult<Id> {
+/// Channel-shaped queries are channels; a bare id is whichever exists
+/// (`set_watch` asks when it's both); otherwise a server name, then a
+/// channel name.
+fn resolve_target(q: &str, live: &LiveState) -> DResult<(Id, Option<TargetKind>)> {
     let t = q.trim();
     let channel_like =
         t.starts_with('#') || t.starts_with('@') || t.contains("/#") || t.contains("discord.com/channels/");
     if channel_like {
-        return resolve_channel(t, live);
+        return Ok((resolve_channel(t, live)?, Some(TargetKind::Channel)));
     }
     if let Some(id) = snowflake(t) {
-        return Ok(id);
+        return Ok((id, None));
     }
     match resolve_server(t, live) {
-        Err(Error::NotFound(_)) => resolve_channel(t, live),
-        other => other,
+        Ok(id) => Ok((id, Some(TargetKind::Guild))),
+        Err(Error::NotFound(_)) => Ok((resolve_channel(t, live)?, Some(TargetKind::Channel))),
+        Err(e) => Err(e),
     }
 }
 
@@ -117,14 +119,14 @@ impl TritoneServer {
     async fn set_watch_level(&self, Parameters(a): Parameters<WatchArgs>) -> Result<CallToolResult, McpError> {
         Ok(self
             .run(|ctx| async move {
-                let target = resolve_target(&a.target, &ctx.live)?;
+                let (target, kind) = resolve_target(&a.target, &ctx.live)?;
                 let level = match a.level {
                     WatchChoice::Full => Some(WatchLevel::Full),
                     WatchChoice::Normal => Some(WatchLevel::Normal),
                     WatchChoice::Muted => Some(WatchLevel::Muted),
                     WatchChoice::Clear => None,
                 };
-                let kind = match triage::set_watch(&ctx, target, level)? {
+                let kind = match triage::set_watch(&ctx, target, kind, level)? {
                     TargetKind::Guild => "server",
                     TargetKind::Channel => "channel",
                 };

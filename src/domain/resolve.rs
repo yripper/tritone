@@ -6,7 +6,7 @@ use crate::discord::types::{Channel, ChannelKind, Id};
 use crate::domain::errors::{Error, Result};
 use crate::domain::live::LiveState;
 
-/// The most candidates an `Ambiguous` error lists.
+/// The most candidates an `Ambiguous` error lists (then "and N more").
 const MAX_CANDIDATES: usize = 10;
 
 struct Candidate {
@@ -211,7 +211,11 @@ fn pick(q: &str, mut found: Vec<Candidate>) -> Result<Id> {
         _ => {
             let mut candidates: Vec<String> = found.into_iter().map(|c| c.label).collect();
             candidates.sort();
+            let cut = candidates.len().saturating_sub(MAX_CANDIDATES);
             candidates.truncate(MAX_CANDIDATES);
+            if cut > 0 {
+                candidates.push(format!("and {cut} more: use a longer part of the name, or server/#name"));
+            }
             Err(Error::Ambiguous { query: q.to_string(), candidates })
         }
     }

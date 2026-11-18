@@ -53,8 +53,9 @@ fn general_in_many_servers_is_ambiguous() {
     let l = world();
     for q in ["#general", "general", "#GENERAL"] {
         let c = candidates(resolve_channel(q, &l).unwrap_err());
-        assert_eq!(c.len(), 10, "at most 10 labels: {c:?}");
-        assert!(c.iter().all(|s| s.contains(" › #general (")), "{c:?}");
+        assert_eq!(c.len(), 11, "10 labels and a count: {c:?}");
+        assert_eq!(c[10], "and 2 more: use a longer part of the name, or server/#name");
+        assert!(c[..10].iter().all(|s| s.contains(" › #general (")), "{c:?}");
         assert!(c.iter().all(|s| !s.contains("general-help")), "exact names win over substrings: {c:?}");
         assert_eq!(c[0], "G001 › #general (101)", "sorted labels with the id: {c:?}");
     }
@@ -116,7 +117,8 @@ fn servers_resolve_by_id_or_name() {
     assert_eq!(resolve_server("rust", &l).unwrap(), Id(2));
     assert_eq!(resolve_server("G001", &l).unwrap(), Id(1), "exact beats G0010-style substrings");
     let c = candidates(resolve_server("G0", &l).unwrap_err());
-    assert_eq!(c.len(), 10);
+    assert_eq!(c.len(), 11);
+    assert_eq!(c[10], "and 1 more: use a longer part of the name, or server/#name");
     assert_eq!(c[0], "G001 (1)");
     assert!(matches!(resolve_server("999", &l), Err(Error::NotFound(_))));
     assert!(matches!(resolve_server("nope", &l), Err(Error::NotFound(_))));

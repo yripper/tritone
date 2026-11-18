@@ -19,7 +19,7 @@ use crate::mcp::http::app;
 use crate::mcp::server::TritoneServer;
 use crate::mcp::state::AppState;
 use crate::secrets::fake::MemSecrets;
-use crate::store::{Store, WatchLevel};
+use crate::store::{Store, TargetKind, WatchLevel};
 use crate::test_support::*;
 
 const ME: u64 = 7;
@@ -230,10 +230,10 @@ async fn triage_tools() {
 
     let v = call(&state, "set_watch_level", json!({"target": "G002", "level": "full"})).await.unwrap();
     assert_eq!(v["kind"], "server");
-    assert_eq!(state.store.get_watch(Id(2)).unwrap(), Some(WatchLevel::Full));
+    assert_eq!(state.store.get_watch(Id(2), TargetKind::Guild).unwrap(), Some(WatchLevel::Full));
     let v = call(&state, "set_watch_level", json!({"target": "G001/#help", "level": "muted"})).await.unwrap();
     assert_eq!(v["kind"], "channel");
     // A muted channel still resolves, so it can be unmuted by name.
     call(&state, "set_watch_level", json!({"target": "#help", "level": "clear"})).await.unwrap();
-    assert_eq!(state.store.get_watch(Id(102)).unwrap(), None);
+    assert_eq!(state.store.get_watch(Id(102), TargetKind::Channel).unwrap(), None);
 }

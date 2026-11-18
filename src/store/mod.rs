@@ -5,7 +5,7 @@ mod kv;
 mod schema;
 mod watch;
 
-pub use watch::{TargetKind, WatchLevel};
+pub use watch::{TargetKind, WatchLevel, WatchMap};
 
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};

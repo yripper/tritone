@@ -1,6 +1,6 @@
 # store
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels, snoozes, categories), voice notes, opportunity ids and the contribution log. **Never message text.**
@@ -12,17 +12,18 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 - `src/store/watch.rs`: `WatchLevel`, `TargetKind`, watch levels and snoozes.
 - `src/store/store_tests.rs`: tests.
 
-## Schema v1 (`src/store/schema.rs:6`)
-All tables are created in v1, so features add methods, not migrations:
-`kv`, `watch`, `snooze`, `category`, `voice_profile`, `chat_notes`, `own_message`, `opportunity`, `activity`. Ids are stored as decimal strings.
+## Schema (`src/store/schema.rs:6`)
+- **v1** creates every table: `kv`, `watch`, `snooze`, `category`, `voice_profile`, `chat_notes`, `own_message`, `opportunity`, `activity`. Ids are stored as decimal strings.
+- **v2** (`src/store/schema.rs:58`) rebuilds `watch` keyed by `(target_id, kind)` and copies the rows: an older server's default channel has the server's own id, so a server level and a channel level can share an id.
 
 ## Public surface
 - `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
 - `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`.
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
-- `TargetKind { Guild, Channel }` (`src/store/watch.rs:42`).
-- `get_watch`, `set_watch` (`None` clears), `all_watch` (`src/store/watch.rs:61`, `:70`, `:84`).
-- `set_snooze` (Unix ms; `None` unsnoozes), `snoozed_until` (returns the stored time even if past) (`src/store/watch.rs:93`, `:107`).
+- `TargetKind { Guild, Channel }` (`src/store/watch.rs:43`), part of the watch key.
+- `WatchMap { guilds, channels }` (`src/store/watch.rs:59`): every explicit level, split by kind.
+- `get_watch(target, kind)`, `set_watch(target, kind, level)` (`None` clears that kind only), `all_watch() -> WatchMap` (`src/store/watch.rs:69`, `:82`, `:98`).
+- `set_snooze` (Unix ms; `None` unsnoozes), `snoozed_until` (returns the stored time even if past) (`src/store/watch.rs:116`, `:130`).
 
 ## Dependencies
 rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.
@@ -33,4 +34,4 @@ rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.
 - New tables' methods go in new files under `src/store/`, using `self.conn()`.
 
 ## Testing
-`cargo test store`: in-memory DB, plus one file DB to check migration idempotence and the 0600 mode.
+`cargo test store`: in-memory DB, plus one file DB to check migration idempotence and the 0600 mode; `migration_v2_keeps_rows` runs v1, inserts rows, then migrates; `guild_and_default_channel_same_id_both_watchable`.

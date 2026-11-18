@@ -1,7 +1,5 @@
 //! What's waiting on the user: which channels are pending and why.
 
-use std::collections::HashMap;
-
 use serde::Serialize;
 
 use crate::discord::types::{Channel, ChannelKind, GuildSettings, Id, Message};
@@ -10,7 +8,7 @@ use crate::domain::live::LiveState;
 use crate::domain::render::{RenderedMessage, render_message};
 use crate::domain::resolve::channel_label;
 use crate::mcp::state::Ctx;
-use crate::store::{Store, WatchLevel};
+use crate::store::{Store, WatchLevel, WatchMap};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -62,22 +60,18 @@ const MAX_PINGS: usize = 5;
 /// The watch level that applies: an explicit level on the channel (for a
 /// thread, then on its parent), then on its server; otherwise a Discord mute
 /// means `Muted`, and DMs and group DMs are `Full`, everything else `Normal`.
-pub fn effective_watch(
-    channel: &Channel,
-    live: &LiveState,
-    watch: &HashMap<Id, WatchLevel>,
-    now_ms: i64,
-) -> WatchLevel {
+pub fn effective_watch(channel: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> WatchLevel {
     watch_of(channel, live, watch, now_ms).0
 }
 
 /// The level, and whether it was set in tritone.
-fn watch_of(c: &Channel, live: &LiveState, watch: &HashMap<Id, WatchLevel>, now_ms: i64) -> (WatchLevel, bool) {
+fn watch_of(c: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> (WatchLevel, bool) {
     let parent = c.parent_id.filter(|_| c.kind.is_thread());
     let explicit = watch
+        .channels
         .get(&c.id)
-        .or_else(|| parent.and_then(|p| watch.get(&p)))
-        .or_else(|| c.guild_id.and_then(|g| watch.get(&g)));
+        .or_else(|| parent.and_then(|p| watch.channels.get(&p)))
+        .or_else(|| c.guild_id.and_then(|g| watch.guilds.get(&g)));
     if let Some(level) = explicit {
         return (*level, true);
     }
@@ -227,8 +221,66 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
         };
         found.push((group, c.last_message_id, item));
     }
+    found.extend(unlisted_pings(live, store, &watch, mentions, me, now_ms)?);
     found.sort_by_key(|(group, newest, _)| (*group, std::cmp::Reverse(*newest)));
     Ok(found.into_iter().map(|(_, _, item)| item).collect())
+}
+
+/// Label of an entry for a channel tritone doesn't hold (or holds without a
+/// name): an archived or unjoined thread, usually.
+const UNLISTED: &str = "(thread or unknown channel)";
+
+/// Whether `pending` handles the channel itself, or it's unknown or nameless.
+fn unlisted(live: &LiveState, channel: Id) -> bool {
+    live.channel(channel).is_none_or(|c| !listable(&c))
+}
+
+/// The inbox's direct mentions and replies to the user in unlisted
+/// channels: a direct ping is always pending, wherever it is. Hidden only by
+/// an explicit tritone mute (channel or server), a snooze, or a read state
+/// past the message.
+fn unlisted_pings(
+    live: &LiveState,
+    store: &Store,
+    watch: &WatchMap,
+    mentions: &[Message],
+    me: Id,
+    now_ms: i64,
+) -> Result<Vec<(u8, Option<Id>, PendingItem)>> {
+    let mut by_channel: Vec<(Id, Vec<&Message>)> = Vec::new();
+    for m in mentions.iter().filter(|m| unlisted(live, m.channel_id)) {
+        let direct = m.mentions.contains(&me) || m.reply_to_author == Some(me);
+        let read = live.read_state(m.channel_id).last_acked.is_some_and(|a| a >= m.id);
+        if !direct || read {
+            continue;
+        }
+        match by_channel.iter_mut().find(|(c, _)| *c == m.channel_id) {
+            Some((_, msgs)) => msgs.push(m),
+            None => by_channel.push((m.channel_id, vec![m])),
+        }
+    }
+    let mut out = Vec::new();
+    for (channel, msgs) in by_channel {
+        let guild = msgs[0].guild_id.or_else(|| live.channel(channel).and_then(|c| c.guild_id));
+        let muted = |level: Option<&WatchLevel>| level == Some(&WatchLevel::Muted);
+        if muted(watch.channels.get(&channel)) || muted(guild.and_then(|g| watch.guilds.get(&g))) {
+            continue;
+        }
+        if store.snoozed_until(channel)?.is_some_and(|t| t > now_ms) {
+            continue;
+        }
+        let direct = msgs.iter().filter(|m| m.mentions.contains(&me)).count() as u32;
+        let server = guild.and_then(|g| live.guild(g)).map_or_else(|| "unknown-server".to_string(), |g| g.name);
+        let item = PendingItem {
+            channel,
+            label: format!("{server} › {UNLISTED}"),
+            reason: if direct > 0 { Reason::Mention } else { Reason::Reply },
+            unread_count_hint: msgs.len() as u32,
+            mention_count: msgs.len() as u32,
+        };
+        out.push((1, msgs.iter().map(|m| m.id).max(), item));
+    }
+    Ok(out)
 }
 
 /// `pending` plus the first unread messages of each entry and, for mentions
@@ -249,6 +301,14 @@ pub async fn get_pending(ctx: &Ctx) -> Result<Vec<PendingEntry>> {
     let (mut kept, mut calls) = (0, 0);
     let mut out = Vec::new();
     for item in pending(&ctx.live, &ctx.store, &mentions, now)? {
+        if unlisted(&ctx.live, item.channel) {
+            // Only the inbox's messages are known: show them, with their links.
+            let mut msgs: Vec<&Message> = mentions.iter().filter(|m| m.channel_id == item.channel).collect();
+            msgs.sort_by_key(|m| m.id);
+            let messages = msgs.into_iter().map(|m| render_message(m, &ctx.live)).collect();
+            out.push(PendingEntry { item, messages, more_unread: true, pings: vec![], error: None });
+            continue;
+        }
         let acked = ctx.live.read_state(item.channel).last_acked;
         // A channel with no read state must be fetched to know whether it's
         // unread at all, so it's fetched even past the budget of kept entries.

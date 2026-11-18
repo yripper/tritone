@@ -13,6 +13,8 @@ pub struct MarkReport {
     pub marked: Vec<Id>,
     /// Channels that had nothing unread.
     pub already_read: Vec<Id>,
+    /// Ids tritone doesn't know as channels: nothing to ack.
+    pub not_found: Vec<Id>,
 }
 
 /// Discord's bulk ack takes at most this many channels.
@@ -23,8 +25,13 @@ const ACK_CHUNK: usize = 100;
 pub async fn mark_read(ctx: &Ctx, channels: &[Id]) -> Result<MarkReport> {
     let mut report = MarkReport::default();
     let mut items = Vec::new();
-    for &id in channels {
-        match ctx.live.channel(id).and_then(|c| c.last_message_id).filter(|_| ctx.live.is_unread(id)) {
+    let mut seen = std::collections::HashSet::new();
+    for &id in channels.iter().filter(|id| seen.insert(**id)) {
+        let Some(c) = ctx.live.channel(id) else {
+            report.not_found.push(id);
+            continue;
+        };
+        match c.last_message_id.filter(|_| ctx.live.is_unread(id)) {
             Some(last) => items.push((id, last)),
             None => report.already_read.push(id),
         }
@@ -54,22 +61,23 @@ pub fn unsnooze(ctx: &Ctx, channel: Id) -> Result<()> {
 }
 
 /// Sets (or with `None` clears) the tritone watch level of a server or a
-/// channel; which one comes from the live model. Returns the kind.
-pub fn set_watch(ctx: &Ctx, target: Id, level: Option<WatchLevel>) -> Result<TargetKind> {
+/// channel. `kind` says which when the caller knows (a `#name` is a channel);
+/// otherwise it comes from the live model. An older server's default channel
+/// shares the server's id, so a bare id that is both needs `kind`.
+pub fn set_watch(ctx: &Ctx, target: Id, kind: Option<TargetKind>, level: Option<WatchLevel>) -> Result<TargetKind> {
     let (guild, channel) = (ctx.live.guild(target).is_some(), ctx.live.channel(target).is_some());
-    // Older servers' default channel has the server's own id, and watch
-    // levels are stored by id alone: a level here would apply to both.
-    if guild && channel {
-        return Err(Error::Invalid(format!(
-            "{target} is both a server and its default channel (same id): tritone can't set a watch level on it yet. Set it on the other channels, or mute it in Discord"
-        )));
-    }
-    let kind = if guild {
-        TargetKind::Guild
-    } else if channel {
-        TargetKind::Channel
-    } else {
-        return Err(Error::NotFound(target.to_string()));
+    let kind = match (kind, guild, channel) {
+        (Some(TargetKind::Guild), true, _) => TargetKind::Guild,
+        (Some(TargetKind::Channel), _, true) => TargetKind::Channel,
+        (Some(_), _, _) => return Err(Error::NotFound(target.to_string())),
+        (None, true, true) => {
+            return Err(Error::Invalid(format!(
+                "{target} is both a server and its default channel: use the server name for the server, or #name for the channel"
+            )));
+        }
+        (None, true, false) => TargetKind::Guild,
+        (None, false, true) => TargetKind::Channel,
+        (None, false, false) => return Err(Error::NotFound(target.to_string())),
     };
     ctx.store.set_watch(target, kind, level)?;
     Ok(kind)

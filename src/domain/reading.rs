@@ -12,7 +12,7 @@ use crate::domain::pending::{effective_watch, listable};
 use crate::domain::render::{RenderedMessage, render_message, rfc3339};
 use crate::domain::resolve::channel_label;
 use crate::mcp::state::Ctx;
-use crate::store::{Store, WatchLevel};
+use crate::store::{Store, WatchLevel, WatchMap};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct History {
@@ -135,10 +135,10 @@ pub fn list_servers(live: &LiveState, store: &Store, now_ms: i64, include_muted:
     let mut out: Vec<ServerInfo> = live
         .guilds()
         .into_iter()
-        .filter(|g| include_muted || watch.get(&g.id) != Some(&WatchLevel::Muted))
+        .filter(|g| include_muted || watch.guilds.get(&g.id) != Some(&WatchLevel::Muted))
         .map(|g| ServerInfo {
             id: g.id,
-            watch: watch.get(&g.id).copied(),
+            watch: watch.guilds.get(&g.id).copied(),
             discord_muted: live.settings(Some(g.id)).is_some_and(|s| s.muted.active(now_ms)),
             unread_channels: unread_channels(live, g.id),
             name: g.name,
@@ -174,19 +174,13 @@ fn kind_matches(c: &Channel, kind: KindFilter) -> bool {
     }
 }
 
-fn info(
-    c: &Channel,
-    live: &LiveState,
-    store: &Store,
-    watch: &HashMap<Id, WatchLevel>,
-    now_ms: i64,
-) -> Result<ChannelInfo> {
+fn info(c: &Channel, live: &LiveState, store: &Store, watch: &WatchMap, now_ms: i64) -> Result<ChannelInfo> {
     Ok(ChannelInfo {
         id: c.id,
         label: channel_label(c, live),
         kind: kind_name(c.kind),
         watch: effective_watch(c, live, watch, now_ms),
-        explicit_watch: watch.get(&c.id).copied(),
+        explicit_watch: watch.channels.get(&c.id).copied(),
         discord_muted: live.discord_muted(c.id, now_ms),
         unread: live.is_unread(c.id),
         mention_count: live.read_state(c.id).mention_count,

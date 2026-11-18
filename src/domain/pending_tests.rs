@@ -1,11 +1,9 @@
-use std::collections::HashMap;
-
 use super::*;
 use crate::discord::fake::Call;
 use crate::discord::gateway::GatewayEvent;
 use crate::discord::types::{Channel, ChannelKind, Id, Message, MuteUntil, ReadySnapshot, Role};
 use crate::domain::test_world::{ME, NOW, unread, world};
-use crate::store::{TargetKind, WatchLevel};
+use crate::store::{TargetKind, WatchLevel, WatchMap};
 use crate::test_support::*;
 
 /// G001 (my role 9) with C101, C102, C103 and a thread T104 under C101;
@@ -162,11 +160,12 @@ fn effective_watch_order() {
     let thread = live.channel(Id(104)).unwrap();
     let c111 = live.channel(Id(111)).unwrap();
     let dm = live.channel(Id(301)).unwrap();
-    let none = HashMap::new();
+    let none = WatchMap::default();
     assert_eq!(effective_watch(&c101, live, &none, NOW), WatchLevel::Muted, "Discord mute");
     assert_eq!(effective_watch(&c111, live, &none, NOW), WatchLevel::Normal);
     assert_eq!(effective_watch(&dm, live, &none, NOW), WatchLevel::Full);
-    let explicit = HashMap::from([(Id(1), WatchLevel::Full), (Id(101), WatchLevel::Normal)]);
+    let explicit =
+        WatchMap { guilds: [(Id(1), WatchLevel::Full)].into(), channels: [(Id(101), WatchLevel::Normal)].into() };
     assert_eq!(effective_watch(&c101, live, &explicit, NOW), WatchLevel::Normal, "channel beats guild");
     assert_eq!(effective_watch(&thread, live, &explicit, NOW), WatchLevel::Normal, "a thread follows its parent");
     let c102 = live.channel(Id(102)).unwrap();
@@ -237,10 +236,43 @@ fn pending_order() {
 fn nameless_channel_never_pending() {
     let w = world(snap());
     // A message in a channel tritone never saw creates a nameless one.
-    let ping = Message { guild_id: Some(Id(1)), mentions: vec![Id(ME)], ..msg(at(1_000), 150, 2, "x") };
-    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(ping.clone())), NOW);
+    let plain = Message { guild_id: Some(Id(1)), ..msg(at(1_000), 150, 2, "x") };
+    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(plain.clone())), NOW);
     assert!(w.ctx.live.channel(Id(150)).unwrap().name.is_none());
-    assert!(pending(&w.ctx.live, &w.ctx.store, &[ping], NOW).unwrap().is_empty());
+    w.ctx.store.set_watch(Id(1), TargetKind::Guild, Some(WatchLevel::Full)).unwrap();
+    let everyone = Message { mention_everyone: true, ..plain };
+    assert!(pending(&w.ctx.live, &w.ctx.store, &[everyone], NOW).unwrap().is_empty(), "no direct mention or reply");
+}
+
+#[tokio::test]
+async fn mention_in_unknown_thread_still_pending() {
+    let mut s = snap();
+    s.settings.push(guild_settings(MuteUntil::Forever, false));
+    let w = world(s);
+    // 150: nameless, made by a gateway message. 999, 997, 996, 995: unknown.
+    let phantom = Message { guild_id: Some(Id(1)), ..msg(at(9_000), 150, 3, "x") };
+    w.ctx.live.apply(GatewayEvent::MessageCreate(Box::new(phantom)), NOW);
+    let reply = Message { reply_to: Some(at(9_500)), reply_to_author: Some(Id(ME)), ..from_u2(at(2_000), 150) };
+    let everyone = Message { mention_everyone: true, ..from_u2(at(1_500), 997) };
+    // Read on another device: the gateway's ack covers it.
+    w.ctx.live.apply(GatewayEvent::MessageAck { channel: Id(996), message: at(500), mention_count: None }, NOW);
+    let read_elsewhere = mention_me(at(800), 996);
+    let in_muted = Message { guild_id: Some(Id(2)), ..mention_me(at(700), 995) };
+    w.ctx.store.set_watch(Id(2), TargetKind::Guild, Some(WatchLevel::Muted)).unwrap();
+    let inbox = vec![mention_me(at(1_000), 999), reply, everyone, read_elsewhere, in_muted];
+
+    let items = pending(&w.ctx.live, &w.ctx.store, &inbox, NOW).unwrap();
+    assert_eq!(reasons(&items), vec![(999, Reason::Mention), (150, Reason::Reply)]);
+    assert_eq!(items[0].label, "G001 › (thread or unknown channel)");
+
+    w.fake.mentions.lock().unwrap().extend(inbox);
+    let entries = get_pending(&w.ctx).await.unwrap();
+    assert_eq!(entries.len(), 2);
+    let e = &entries[0];
+    assert_eq!(e.messages.len(), 1);
+    assert_eq!(e.messages[0].id, at(1_000).to_string());
+    assert_eq!(e.messages[0].link, format!("https://discord.com/channels/1/999/{}", at(1_000)));
+    assert!(w.fake.calls().iter().all(|c| !matches!(c, Call::History { channel, .. } if *channel == Id(999))));
 }
 
 #[test]

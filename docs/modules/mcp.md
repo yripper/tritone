@@ -1,6 +1,6 @@
 # mcp
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (default 7781). Stateless, behind a Host check and a bearer token. Tools are split into one router per group.
@@ -24,9 +24,9 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
   - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages).
   - `get_channel_info{channel}` (`src/mcp/tools/read.rs:194`), `find_user{query}` (`src/mcp/tools/read.rs:206`) → `{users}`.
 - **Triage** (`src/mcp/tools/triage.rs`):
-  - `mark_read{channels[]}` (`src/mcp/tools/triage.rs:83`): every name must resolve first, or nothing is acked; → `{marked, already_read}`.
-  - `snooze{channel, until}` (`src/mcp/tools/triage.rs:93`): `until` is RFC 3339 with offset; past times are refused. `unsnooze{channel}` (`src/mcp/tools/triage.rs:104`).
-  - `set_watch_level{target, level: full|normal|muted|clear}` (`src/mcp/tools/triage.rs:117`): channel-shaped targets (`#`, `@`, `/#`, links) are channels; a bare id is whichever exists; otherwise a server name, then a channel name (`resolve_target`, `src/mcp/tools/triage.rs:55`). → `{target, kind: server|channel, level}`.
+  - `mark_read{channels[]}` (`src/mcp/tools/triage.rs:85`): every name must resolve first, or nothing is acked; → `{marked, already_read, not_found}`.
+  - `snooze{channel, until}` (`src/mcp/tools/triage.rs:95`): `until` is RFC 3339 with offset; past times are refused. `unsnooze{channel}` (`src/mcp/tools/triage.rs:106`).
+  - `set_watch_level{target, level: full|normal|muted|clear}` (`src/mcp/tools/triage.rs:119`): channel-shaped targets (`#`, `@`, `/#`, links) are channels; a bare id is whichever exists (one that is both a server and its default channel must be named instead); otherwise a server name, then a channel name (`resolve_target`, `src/mcp/tools/triage.rs:56`). → `{target, kind: server|channel, level}`.
 - The write, engage and activity groups belong to other modules.
 
 ## Key methods

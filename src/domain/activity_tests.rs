@@ -303,3 +303,14 @@ fn my_activity_caps_links_at_50() {
     let sum = my_activity(&r.ctx.store, &r.ctx.live, T0, T0 + 100_000).unwrap();
     assert_eq!((sum.total, sum.messages.len()), (60, 50));
 }
+
+#[tokio::test]
+async fn backfill_stops_when_tritone_is_halted_elsewhere() {
+    let r = rig();
+    index(&r, (0..30).map(|i| gmsg(i, 100, 10, ME, "x")).collect());
+    // The gateway halts tritone while the backfill is between pages.
+    r.ctx.live.halt(DiscordError::Locked);
+    let e = backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap_err();
+    assert!(matches!(e, Error::Discord(DiscordError::Locked)));
+    assert!(searches(&r.api).is_empty(), "no search while halted");
+}

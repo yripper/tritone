@@ -167,11 +167,12 @@ async fn second_rate_limit_fails_the_job_and_the_queue_goes_on() {
 #[tokio::test]
 async fn other_errors_fail_only_that_job_without_retry() {
     let r = rig(&[20_000]);
-    r.api.fail_on("send", DiscordError::Http("boom".into()));
+    r.api.fail_on("send", DiscordError::Forbidden);
     r.q.enqueue(send("one")).unwrap();
     r.q.enqueue(send("two")).unwrap();
     drain(&r.q).await;
-    assert!(job(&r.q, 1).error.unwrap().contains("boom"));
+    assert_eq!(job(&r.q, 1).status, JobStatus::Failed);
+    assert!(job(&r.q, 1).error.unwrap().contains("no access"));
     assert_eq!(job(&r.q, 2).status, JobStatus::Sent);
     assert_eq!(send_nonces(&r.api).len(), 2, "no retry without Retry-After");
 }
@@ -448,4 +449,182 @@ fn earliest_combines_gap_pause_and_cap() {
     assert_eq!(earliest(100, Some(50), 20_000, None, &VecDeque::new()), 20_050);
     assert_eq!(earliest(100, None, 20_000, Some(9_000), &VecDeque::new()), 9_000);
     assert_eq!(earliest(100, Some(29_000), 20_000, None, &w), HOUR_MS);
+}
+
+// --- Writes whose outcome is unknown (B1) ---
+
+fn unknown_text(j: &JobView) -> bool {
+    j.error.as_deref().is_some_and(|e| e.contains("may have been sent: check the channel (read_history)"))
+}
+
+#[tokio::test]
+async fn network_error_on_send_retries_once_with_the_same_nonce_then_is_unknown() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("send", DiscordError::Http("timed out".into()));
+    r.api.fail_on("send", DiscordError::Http("timed out".into()));
+    r.q.enqueue(send("hi")).unwrap();
+    drain(&r.q).await;
+    let nonces = send_nonces(&r.api);
+    assert_eq!(nonces.len(), 2, "one prompt retry");
+    assert_eq!(nonces[0], nonces[1], "same nonce, so Discord delivers it once");
+    let t = r.api.times_of(is_send);
+    assert!(t[1] - t[0] < MIN_GAP_MS as i64, "promptly, not after a gap");
+    let j = job(&r.q, 1);
+    assert_eq!(j.status, JobStatus::Unknown);
+    assert!(unknown_text(&j), "{:?}", j.error);
+}
+
+#[tokio::test]
+async fn network_error_then_success_on_the_retry_is_sent() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("send", DiscordError::Api { status: 502, code: None });
+    r.q.enqueue(send("hi")).unwrap();
+    drain(&r.q).await;
+    let j = job(&r.q, 1);
+    assert_eq!(j.status, JobStatus::Sent);
+    assert!(j.sent_message_id.is_some());
+}
+
+#[tokio::test]
+async fn unknown_outcome_on_writes_without_nonce_is_not_retried() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("create_forum_post", DiscordError::Api { status: 504, code: None });
+    // A 2xx whose body didn't parse: the write probably happened.
+    r.api.fail_on("react", DiscordError::Api { status: 200, code: None });
+    r.api.fail_on("create_thread", DiscordError::Http("connection reset".into()));
+    r.q.enqueue(JobSpec::ForumPost { forum: FORUM, name: "T".into(), content: "x".into() }).unwrap();
+    r.q.enqueue(JobSpec::React { channel: CH, message: Id(5), emoji: "x".into() }).unwrap();
+    r.q.enqueue(JobSpec::Thread { channel: CH, from_message: None, name: "T".into(), content: Some("hi".into()) })
+        .unwrap();
+    drain(&r.q).await;
+    let calls = r.api.calls();
+    let count = |f: fn(&Call) -> bool| calls.iter().filter(|c| f(c)).count();
+    assert_eq!(count(|c| matches!(c, Call::CreateForumPost { .. })), 1);
+    assert_eq!(count(|c| matches!(c, Call::React { .. })), 1);
+    assert_eq!(count(|c| matches!(c, Call::CreateThread { .. })), 1);
+    assert_eq!(count(is_send), 0);
+    for id in 1..=3 {
+        let j = job(&r.q, id);
+        assert_eq!(j.status, JobStatus::Unknown, "job {id}");
+        assert!(unknown_text(&j), "job {id}: {:?}", j.error);
+    }
+}
+
+#[tokio::test]
+async fn network_error_on_typing_is_a_plain_failure() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("typing", DiscordError::Http("timed out".into()));
+    r.q.enqueue(send("hi")).unwrap();
+    drain(&r.q).await;
+    let j = job(&r.q, 1);
+    assert_eq!(j.status, JobStatus::Failed, "nothing was written");
+    assert!(send_nonces(&r.api).is_empty());
+}
+
+// --- Failed attempts still pace (B2) ---
+
+#[tokio::test]
+async fn failed_attempt_still_counts_for_the_gap_and_the_cap() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("send", DiscordError::Forbidden);
+    r.q.enqueue(send("one")).unwrap();
+    r.q.enqueue(send("two")).unwrap();
+    drain(&r.q).await;
+    assert_eq!(job(&r.q, 1).status, JobStatus::Failed);
+    let t = r.api.times_of(is_send);
+    let typed = r.api.times_of(is_typing);
+    assert!(typed[1] - t[0] >= MIN_GAP_MS as i64, "the second job waits 20-60 s after the failed attempt");
+    assert_eq!(r.q.status(None).unwrap().writes_last_hour, 2);
+}
+
+// --- Resume after an edge block (a) ---
+
+#[tokio::test]
+async fn resume_after_a_block_still_waits_its_retry_after() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("send", DiscordError::Blocked { retry_after_s: 600 });
+    r.q.enqueue(send("one")).unwrap();
+    r.q.enqueue(send("two")).unwrap();
+    drain(&r.q).await;
+    let blocked_at = r.api.times_of(is_send)[0];
+    r.q.resume().unwrap();
+    drain(&r.q).await;
+    let t = r.api.times_of(is_typing);
+    assert!(t[1] >= blocked_at + 600_000, "the next write waits the block's Retry-After");
+    assert_eq!(job(&r.q, 2).status, JobStatus::Sent);
+}
+
+// --- Pacing survives a restart (b) ---
+
+#[tokio::test]
+async fn pacing_survives_a_restart() {
+    let r = rig(&[30_000]);
+    r.q.enqueue(send("before")).unwrap();
+    drain(&r.q).await;
+    let first = r.api.times_of(is_send)[0];
+    // A new queue on the same store, as after `pm2 restart`.
+    let q2 = SendQueue::new(
+        r.store.clone(),
+        r.live.clone(),
+        Arc::new(Config::default()),
+        r.api.timer.clone(),
+        Arc::new(SeqGaps::new(&[30_000])),
+    );
+    q2.attach(r.api.clone());
+    let e = q2.enqueue(send("after")).unwrap();
+    assert!(e.eta_secs >= 20, "eta counts from the last write before the restart");
+    drain(&q2).await;
+    let t = r.api.times_of(is_typing);
+    assert!(t[1] - first >= 30_000);
+    assert_eq!(q2.status(None).unwrap().writes_last_hour, 2, "the hourly window too");
+}
+
+// --- Messages that arrived while the job waited (c) ---
+
+#[tokio::test]
+async fn messages_that_arrived_while_waiting_are_listed_as_unseen() {
+    let r = rig(&[20_000]);
+    let read = crate::test_support::id_at(T0 - 60_000);
+    r.live.apply(GatewayEvent::MessageAck { channel: CH, message: read, mention_count: None }, T0);
+    r.q.enqueue(send("my reply")).unwrap();
+    // Someone posts after the user approved the reply, before it goes out.
+    let mut late = crate::test_support::msg(crate::test_support::id_at(T0 + 1_000), CH.0, 2, "nvm, solved it");
+    late.guild_id = Some(Id(10));
+    late.attachments = vec!["image: a.png".into()];
+    let mut old = crate::test_support::msg(crate::test_support::id_at(T0 - 120_000), CH.0, 2, "seen already");
+    old.guild_id = Some(Id(10));
+    r.api.inner.put_history(CH, vec![old.clone(), late.clone()]);
+    r.live.apply(GatewayEvent::MessageCreate(Box::new(late.clone())), T0 + 1_000);
+    drain(&r.q).await;
+    let j = job(&r.q, 1);
+    assert_eq!(j.status, JobStatus::Sent);
+    let unseen = j.unseen.expect("unseen listed");
+    assert_eq!(unseen.len(), 1, "only others' messages after the read point, before the send");
+    assert_eq!(unseen[0].id, late.id.to_string());
+    assert_eq!(unseen[0].from, "U002");
+    assert_eq!(unseen[0].text, "nvm, solved it [image: a.png]");
+}
+
+#[tokio::test]
+async fn nothing_new_means_no_history_call() {
+    let r = rig(&[20_000]);
+    let read = crate::test_support::id_at(T0 - 60_000);
+    r.live.apply(GatewayEvent::MessageAck { channel: CH, message: read, mention_count: None }, T0);
+    r.q.enqueue(send("hi")).unwrap();
+    drain(&r.q).await;
+    assert!(!r.api.calls().iter().any(|c| matches!(c, Call::History { .. })));
+    assert_eq!(job(&r.q, 1).unseen, None);
+}
+
+// --- Resume also lifts the REST client's halt (d) ---
+
+#[tokio::test]
+async fn resume_clears_the_rest_clients_halt_too() {
+    let r = rig(&[20_000]);
+    r.api.fail_on("send", DiscordError::Captcha);
+    r.q.enqueue(send("one")).unwrap();
+    drain(&r.q).await;
+    assert_eq!(r.api.cleared(), 0);
+    r.q.resume().unwrap();
+    assert_eq!(r.api.cleared(), 1);
 }

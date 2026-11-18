@@ -5,10 +5,16 @@
 //! first; reactions skip typing but keep the gaps.
 //!
 //! Text lives only in memory and is dropped when the job finishes; a restart
-//! drops unsent jobs. The only automatic retry is one after a rate limit,
-//! after its Retry-After and with the same nonce, so Discord can't
-//! double-post; writes without a nonce (thread creation, forum posts,
-//! reactions) are never retried. A halting error (CAPTCHA, locked account, edge block, dead
+//! drops unsent jobs; the pacing itself (last write, last hour) is kept in
+//! `kv`, so a restart can't burst. Every attempt counts toward the pacing,
+//! failed or not.
+//!
+//! Retries are limited to what Discord can deduplicate, a message with a
+//! nonce: once after a rate limit (after its Retry-After), and once promptly
+//! when a send's outcome is unknown (network error, 5xx, unreadable 2xx).
+//! Writes without a nonce (thread creation, forum posts, reactions) are never
+//! retried. A write whose outcome stays unknown is reported as `unknown`,
+//! never as `failed`, so it isn't approved and sent twice. A halting error (CAPTCHA, locked account, edge block, dead
 //! token) fails that job, pauses the queue with the other jobs still queued,
 //! and halts all of tritone through `LiveState`. Only `resume` (the user's
 //! explicit "continue") lifts it.
@@ -17,7 +23,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use super::activity::{channel_label, message_link, record_own};
@@ -41,6 +47,16 @@ pub const RATE_LIMIT_MAX_SECS: u64 = 600;
 const KEEP_FINISHED: usize = 50;
 /// How often a queue waiting for the connection checks again.
 const NOT_READY_POLL_MS: i64 = 5_000;
+/// Wait before re-sending a message whose outcome is unknown. Short, because
+/// Discord only deduplicates a nonce "in a short period of time"
+/// (https://docs.discord.food/resources/message#create-message).
+const UNKNOWN_RETRY_MS: i64 = 2_000;
+/// Others' messages listed per job as unseen.
+const MAX_UNSEEN: usize = 20;
+/// `kv` key of the pacing state.
+const KV_PACING: &str = "send_pacing";
+/// What an `unknown` job tells Claude.
+const MAY_HAVE_BEEN_SENT: &str = "may have been sent: check the channel (read_history) before queueing it again";
 
 /// One write. Text fields are dropped once the job finishes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +138,22 @@ pub enum JobStatus {
     Sending,
     Sent,
     Failed,
+    /// The write may or may not have happened (network error, 5xx, unreadable
+    /// reply). Check the channel before queueing it again.
+    Unknown,
+}
+
+/// A message someone else posted while the job waited: between the channel's
+/// read point at enqueue and the sent message. The ack after the send marks
+/// it read, so `send_status` shows it instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnseenMessage {
+    pub id: String,
+    pub from: String,
+    pub from_id: String,
+    pub at: String,
+    /// The text, with attachments and embeds as `[image: …]`, `[embed: …]`.
+    pub text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +177,16 @@ struct Job {
     error: Option<String>,
     ack_error: Option<String>,
     retried: bool,
+    enqueued_ms: i64,
+    /// Sends only: the channel's last acked message at enqueue.
+    read_point: Option<Id>,
+    /// Sends only: everything after this, up to the sent message, counts as
+    /// unseen (set just before the send), and the channel's newest message then.
+    unseen_after: Option<Id>,
+    newest_before_send: Option<Id>,
+    unseen: Option<Vec<UnseenMessage>>,
+    unseen_more: bool,
+    unseen_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -171,6 +213,15 @@ pub struct JobView {
     /// Sent, but marking the channel read failed. Never resend.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ack_error: Option<String>,
+    /// Others' messages that arrived while the job waited, oldest first,
+    /// marked read by the send: show them to the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unseen: Option<Vec<UnseenMessage>>,
+    /// More unseen messages than listed: read the channel.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unseen_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unseen_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -215,7 +266,65 @@ struct State {
     paused_until_ms: Option<i64>,
     /// Set by a halting error; only `resume` clears it.
     paused: Option<DiscordError>,
+    /// When `paused` was set: an edge block's Retry-After counts from then.
+    paused_at_ms: Option<i64>,
     api: Option<Arc<dyn DiscordApi>>,
+}
+
+/// The pacing state kept in `kv` across restarts.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Pacing {
+    last_write_ms: Option<i64>,
+    window: Vec<i64>,
+}
+
+fn load_pacing(store: &Store) -> Pacing {
+    match store.kv_get(KV_PACING) {
+        Ok(Some(v)) => serde_json::from_str(&v).unwrap_or_default(),
+        Ok(None) => Pacing::default(),
+        Err(e) => {
+            tracing::warn!("reading the send pacing failed: {e}");
+            Pacing::default()
+        }
+    }
+}
+
+/// The write may have happened: the connection failed mid-request, Discord's
+/// edge returned a 5xx, or a 2xx came back that couldn't be read.
+fn outcome_unknown(e: &DiscordError) -> bool {
+    match e {
+        DiscordError::Http(_) => true,
+        DiscordError::Api { status, .. } => *status >= 500 || (200..300).contains(status),
+        _ => false,
+    }
+}
+
+/// Why an attempt failed, and whether the write may have gone out anyway.
+struct Failure {
+    e: DiscordError,
+    maybe_sent: bool,
+}
+
+impl Failure {
+    /// A failure before anything was written (e.g. typing).
+    fn before_write(e: DiscordError) -> Failure {
+        Failure { e, maybe_sent: false }
+    }
+
+    /// A failure of the write call itself.
+    fn of_write(e: DiscordError) -> Failure {
+        let maybe_sent = outcome_unknown(&e);
+        Failure { e, maybe_sent }
+    }
+}
+
+/// One line of text for an unseen message: the text plus placeholders.
+fn unseen_text(m: &Message) -> String {
+    let mut parts = vec![m.content.clone()];
+    parts.extend(m.attachments.iter().map(|a| format!("[{a}]")));
+    parts.extend(m.embeds.iter().map(|t| format!("[embed: {t}]")));
+    parts.retain(|p| !p.is_empty());
+    parts.join(" ")
 }
 
 /// Halts all of tritone after a halting error, unless it's already halted:
@@ -295,6 +404,9 @@ fn view(j: &Job, eta: Option<i64>, now: i64) -> JobView {
         sent_at: j.sent_at_ms.map(rfc3339_ms),
         error: j.error.clone(),
         ack_error: j.ack_error.clone(),
+        unseen: j.unseen.clone(),
+        unseen_more: j.unseen_more,
+        unseen_error: j.unseen_error.clone(),
     }
 }
 
@@ -316,8 +428,19 @@ fn fail(j: &mut Job, reason: String) {
     j.spec = None;
 }
 
+/// The write may have happened: never shown as failed.
+fn mark_unknown(j: &mut Job, e: &DiscordError) {
+    let what = match j.thread {
+        Some(t) if j.what == "thread" => format!("the thread was created (id {t}); its first message "),
+        _ => String::new(),
+    };
+    j.status = JobStatus::Unknown;
+    j.error = Some(format!("{what}{MAY_HAVE_BEEN_SENT} ({e})"));
+    j.spec = None;
+}
+
 fn trim_finished(jobs: &mut VecDeque<Job>) {
-    let finished = |j: &Job| matches!(j.status, JobStatus::Sent | JobStatus::Failed);
+    let finished = |j: &Job| matches!(j.status, JobStatus::Sent | JobStatus::Failed | JobStatus::Unknown);
     let mut extra = jobs.iter().filter(|j| finished(j)).count().saturating_sub(KEEP_FINISHED);
     jobs.retain(|j| {
         if extra > 0 && finished(j) {
@@ -347,8 +470,14 @@ impl SendQueue {
         timer: Arc<dyn Timer>,
         rng: Arc<dyn GapRng>,
     ) -> SendQueue {
+        let pacing = load_pacing(&store);
         SendQueue {
-            state: Mutex::new(State { next_id: 1, ..State::default() }),
+            state: Mutex::new(State {
+                next_id: 1,
+                last_write_ms: pacing.last_write_ms,
+                window: pacing.window.into(),
+                ..State::default()
+            }),
             notify: Notify::new(),
             store,
             live,
@@ -377,6 +506,10 @@ impl SendQueue {
         let target = spec.target();
         let guild = self.live.channel(target).and_then(|c| c.guild_id);
         let label = channel_label(&self.live, target);
+        let read_point = match &spec {
+            JobSpec::Send { .. } => self.live.read_state(target).last_acked,
+            _ => None,
+        };
         let mut s = self.lock();
         let id = s.next_id;
         s.next_id += 1;
@@ -396,6 +529,13 @@ impl SendQueue {
             error: None,
             ack_error: None,
             retried: false,
+            enqueued_ms: now,
+            read_point,
+            unseen_after: None,
+            newest_before_send: None,
+            unseen: None,
+            unseen_more: false,
+            unseen_error: None,
         });
         let eta = etas(&s, now).get(&id).copied().unwrap_or(now);
         let position = s.jobs.iter().filter(|j| j.status == JobStatus::Queued).count();
@@ -437,13 +577,28 @@ impl SendQueue {
 
     /// The user's explicit "continue" after a halt. Refuses while the login
     /// is dead (`tritone login` fixes that). For a CAPTCHA, a locked account
-    /// or an edge block it lifts tritone's halt, then resumes the queue once
-    /// the connection is ready. The job that hit the error stays failed.
+    /// or an edge block it lifts tritone's halt and the REST client's own,
+    /// then resumes the queue once the connection is ready; after a block,
+    /// writes still wait its Retry-After, counted from when it hit. The job
+    /// that hit the error stays failed.
     pub fn resume(&self) -> Result<QueueStatus> {
-        match self.live.connection() {
+        let live_halt = match self.live.connection() {
             ConnState::Halted(DiscordError::NeedsLogin) => return Err(Error::Discord(DiscordError::NeedsLogin)),
-            ConnState::Halted(_) => self.live.clear_halt(),
-            _ => {}
+            ConnState::Halted(e) => Some(e),
+            _ => None,
+        };
+        let (api, block_s, paused_at) = {
+            let s = self.lock();
+            let block = |e: Option<&DiscordError>| match e {
+                Some(DiscordError::Blocked { retry_after_s }) => Some(*retry_after_s),
+                _ => None,
+            };
+            let block_s = block(live_halt.as_ref()).max(block(s.paused.as_ref()));
+            (s.api.clone(), block_s, s.paused_at_ms)
+        };
+        self.live.clear_halt();
+        if let Some(api) = api {
+            api.clear_halt();
         }
         if !matches!(self.live.connection(), ConnState::Ready { .. }) {
             return Err(Error::Invalid(
@@ -451,7 +606,15 @@ impl SendQueue {
                     .into(),
             ));
         }
-        self.lock().paused = None;
+        let now = self.timer.now_ms();
+        let mut s = self.lock();
+        if let Some(secs) = block_s {
+            let until = paused_at.unwrap_or(now) + secs as i64 * 1000;
+            s.paused_until_ms = s.paused_until_ms.max(Some(until));
+        }
+        s.paused = None;
+        s.paused_at_ms = None;
+        drop(s);
         tracing::info!("send queue resumed");
         self.notify.notify_one();
         self.status(None)
@@ -539,7 +702,38 @@ impl SendQueue {
         Ok(())
     }
 
-    async fn perform(&self, job: &Job, api: &dyn DiscordApi) -> std::result::Result<Option<Message>, DiscordError> {
+    /// Sends a nonce'd message. When the outcome is unknown, sends it again
+    /// once, promptly, with the same nonce: Discord delivers it only once. A
+    /// failure after an unknown first attempt stays "maybe sent".
+    async fn send_nonced(
+        &self,
+        api: &dyn DiscordApi,
+        channel: Id,
+        msg: &OutgoingMessage,
+    ) -> std::result::Result<Message, Failure> {
+        match api.send(channel, msg).await {
+            Ok(m) => Ok(m),
+            Err(e) if outcome_unknown(&e) => {
+                tracing::warn!(kind = e.kind(), "send outcome unknown; sending again with the same nonce");
+                self.timer.sleep_until(self.timer.now_ms() + UNKNOWN_RETRY_MS).await;
+                api.send(channel, msg).await.map_err(|e| Failure { e, maybe_sent: true })
+            }
+            Err(e) => Err(Failure::of_write(e)),
+        }
+    }
+
+    /// Remembers, just before a send, where "unseen" starts: the read point
+    /// at enqueue or a later one (the user may have read since), else the
+    /// enqueue time. Taken before the send because the send's own echo acks
+    /// the channel.
+    fn mark_unseen_window(&self, job: &Job, channel: Id) {
+        let acked_now = self.live.read_state(channel).last_acked;
+        let after = job.read_point.max(acked_now).unwrap_or_else(|| Id::from_timestamp_ms(job.enqueued_ms, 0));
+        let newest = self.live.channel(channel).and_then(|c| c.last_message_id);
+        self.update(job.id, |_, j| (j.unseen_after, j.newest_before_send) = (Some(after), newest));
+    }
+
+    async fn perform(&self, job: &Job, api: &dyn DiscordApi) -> std::result::Result<Option<Message>, Failure> {
         let Some(spec) = &job.spec else { return Ok(None) };
         let out = |content: &str, reply_to: Option<Id>| OutgoingMessage {
             content: content.to_string(),
@@ -549,28 +743,83 @@ impl SendQueue {
         };
         match spec {
             JobSpec::Send { channel, content, reply_to, .. } => {
-                self.type_for_a_while(api, *channel).await?;
-                api.send(*channel, &out(content, *reply_to)).await.map(Some)
+                self.type_for_a_while(api, *channel).await.map_err(Failure::before_write)?;
+                self.mark_unseen_window(job, *channel);
+                self.send_nonced(api, *channel, &out(content, *reply_to)).await.map(Some)
             }
-            JobSpec::React { channel, message, emoji } => api.react(*channel, *message, emoji).await.map(|()| None),
+            JobSpec::React { channel, message, emoji } => {
+                api.react(*channel, *message, emoji).await.map(|()| None).map_err(Failure::of_write)
+            }
             JobSpec::Thread { channel, from_message, name, content } => {
                 let thread = match job.thread {
                     Some(t) => t,
                     None => {
-                        let t = api.create_thread(*channel, *from_message, name).await?.id;
+                        let t = api.create_thread(*channel, *from_message, name).await.map_err(Failure::of_write)?.id;
                         self.update(job.id, |_, j| j.thread = Some(t));
                         t
                     }
                 };
                 let Some(text) = content else { return Ok(None) };
-                self.type_for_a_while(api, thread).await?;
-                api.send(thread, &out(text, None)).await.map(Some)
+                self.type_for_a_while(api, thread).await.map_err(Failure::before_write)?;
+                self.send_nonced(api, thread, &out(text, None)).await.map(Some)
             }
             JobSpec::ForumPost { forum, name, content } => {
-                self.type_for_a_while(api, *forum).await?;
-                let (thread, msg) = api.create_forum_post(*forum, name, content, self.nonce_for(job.id)).await?;
+                self.type_for_a_while(api, *forum).await.map_err(Failure::before_write)?;
+                let (thread, msg) = api
+                    .create_forum_post(*forum, name, content, self.nonce_for(job.id))
+                    .await
+                    .map_err(Failure::of_write)?;
                 self.update(job.id, |_, j| j.thread = Some(thread.id));
                 Ok(Some(msg))
+            }
+        }
+    }
+
+    /// Others' messages posted while a send waited, so `send_status` can show
+    /// them before the ack marks them read. Reads history only when the
+    /// channel had something newer than the read point.
+    async fn check_unseen(&self, id: u64, api: &dyn DiscordApi, sent: &Message) {
+        let (after, newest) = {
+            let s = self.lock();
+            match s.jobs.iter().find(|j| j.id == id) {
+                Some(j) => (j.unseen_after, j.newest_before_send),
+                None => return,
+            }
+        };
+        let Some(after) = after else { return };
+        if newest.is_none_or(|n| n <= after) {
+            return;
+        }
+        let me = self.live.me().map(|u| u.id);
+        match api.history(sent.channel_id, None, Some(after), 50).await {
+            Ok(page) => {
+                let mut others: Vec<&Message> =
+                    page.iter().filter(|m| m.id > after && m.id < sent.id && Some(m.author.id) != me).collect();
+                others.sort_by_key(|m| m.id);
+                let more = others.len() > MAX_UNSEEN;
+                let unseen: Vec<UnseenMessage> = others
+                    .into_iter()
+                    .take(MAX_UNSEEN)
+                    .map(|m| UnseenMessage {
+                        id: m.id.to_string(),
+                        from: m.author.label().to_string(),
+                        from_id: m.author.id.to_string(),
+                        at: rfc3339_ms(m.timestamp_ms),
+                        text: unseen_text(m),
+                    })
+                    .collect();
+                self.update(id, |_, j| {
+                    j.unseen_more = more;
+                    j.unseen = (!unseen.is_empty()).then_some(unseen);
+                });
+            }
+            Err(e) => {
+                tracing::warn!(job = id, kind = e.kind(), "checking for unseen messages failed");
+                let note = format!("could not check for messages that arrived meanwhile: {e}. Read the channel.");
+                self.update(id, |_, j| j.unseen_error = Some(note));
+                if e.halts() {
+                    self.halt(e);
+                }
             }
         }
     }
@@ -581,9 +830,8 @@ impl SendQueue {
             Some(JobSpec::Send { kind, .. }) => kind.clone(),
             _ => None,
         };
-        self.update(job.id, |s, j| {
-            s.last_write_ms = Some(now);
-            push_window(&mut s.window, now);
+        self.note_write(now);
+        self.update(job.id, |_, j| {
             j.status = JobStatus::Sent;
             j.sent_at_ms = Some(now);
             j.sent_message = message.as_ref().map(|m| m.id);
@@ -598,6 +846,9 @@ impl SendQueue {
         }
         // From here on the message is out: a failure must not look like a
         // failed send, or it gets approved and sent again.
+        if matches!(job.spec, Some(JobSpec::Send { .. })) {
+            self.check_unseen(job.id, api, &msg).await;
+        }
         match api.ack(msg.channel_id, msg.id).await {
             Ok(()) => self.live.note_acked(msg.channel_id, msg.id),
             Err(e) => {
@@ -610,15 +861,19 @@ impl SendQueue {
         }
     }
 
-    fn on_error(&self, id: u64, e: DiscordError) {
-        tracing::warn!(job = id, kind = e.kind(), "write failed");
+    fn on_error(&self, id: u64, f: Failure) {
+        let Failure { e, maybe_sent } = f;
+        tracing::warn!(job = id, kind = e.kind(), maybe_sent, "write failed");
+        let now = self.timer.now_ms();
+        // Whatever happened, the attempt reached Discord: it paces like a write.
+        self.note_write(now);
         if e.halts() {
-            self.update(id, |_, j| fail(j, e.to_string()));
+            self.update(id, |_, j| if maybe_sent { mark_unknown(j, &e) } else { fail(j, e.to_string()) });
             self.halt(e);
             return;
         }
-        let now = self.timer.now_ms();
         self.update(id, |s, j| match &e {
+            _ if maybe_sent => mark_unknown(j, &e),
             DiscordError::RateLimited { retry_after_s } => {
                 // Every later write waits out the Retry-After too.
                 s.paused_until_ms = Some(now + (*retry_after_s).min(RATE_LIMIT_MAX_SECS) as i64 * 1000);
@@ -643,6 +898,22 @@ impl SendQueue {
         });
     }
 
+    /// Records a write attempt for the gap and the hourly cap, and keeps the
+    /// pacing in `kv` so a restart can't burst.
+    fn note_write(&self, at: i64) {
+        let pacing = {
+            let mut s = self.lock();
+            s.last_write_ms = Some(at);
+            push_window(&mut s.window, at);
+            Pacing { last_write_ms: s.last_write_ms, window: s.window.iter().copied().collect() }
+        };
+        let saved =
+            serde_json::to_string(&pacing).map_err(anyhow::Error::from).and_then(|v| self.store.kv_set(KV_PACING, &v));
+        if let Err(e) = saved {
+            tracing::warn!("saving the send pacing failed: {e}");
+        }
+    }
+
     /// Stops the queue and all of tritone. Jobs still queued stay queued
     /// for the user to resume or abandon.
     fn halt(&self, e: DiscordError) {
@@ -656,6 +927,7 @@ impl SendQueue {
             let queued = s.jobs.iter().filter(|j| j.status == JobStatus::Queued).count();
             tracing::warn!(kind = e.kind(), queued, "send queue paused");
             s.paused = Some(e);
+            s.paused_at_ms = Some(self.timer.now_ms());
         }
     }
 

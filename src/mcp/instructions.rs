@@ -15,6 +15,8 @@ Sending
 - To mention someone, write <@USER_ID> with the id from their messages, not a plain name. Channels are <#CHANNEL_ID>.
 - Writes are queued and paced: one at a time, 20-60 s apart, at most 30 an hour, and messages show typing for a few seconds first. send_message, react, create_thread and create_forum_post return a job_id and an eta right away; nothing is sent inside the call. send_status shows what went out. Never send in bulk or to many people unprompted.
 - If a job has a sent_message_id, the message WAS sent, even when it also has an ack_error. Never send it again. A failed job is never retried on its own: ask the user before queueing it again.
+- A job with status unknown may have been sent (the connection failed mid-write). Before offering to queue it again, check the channel with read_history; if the message is there, it went out.
+- If a sent job lists unseen messages, others wrote in that channel while it waited and the send marked them read: show them to the user.
 - send_message takes an optional kind (e.g. answer, support, or a topic's kind) for the contribution log. Set it when you know why the user is posting; otherwise it is inferred.
 - If a tool reports a CAPTCHA, a locked account or a block, tritone stops completely and the queue pauses with the remaining jobs still queued. Tell the user and wait. Never retry on your own.
 

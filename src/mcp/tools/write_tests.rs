@@ -98,3 +98,15 @@ async fn resume_refuses_needs_login() {
     assert_eq!(r.is_error, Some(true));
     assert!(text(&r).contains("tritone login"));
 }
+
+#[tokio::test]
+async fn resume_queue_lifts_the_rest_clients_own_halt() {
+    let (s, _) = server();
+    let timer = Arc::new(FakeTimer::at(T0));
+    let api = Arc::new(crate::domain::test_api::Api::new(timer));
+    s.state.set_api(Some(api.clone() as Arc<dyn DiscordApi>));
+    s.state.live.halt(DiscordError::Captcha);
+    let r = s.resume_queue().await.unwrap();
+    assert_ne!(r.is_error, Some(true), "{}", text(&r));
+    assert_eq!(api.cleared(), 1, "the client AppState holds now, not a stale one");
+}

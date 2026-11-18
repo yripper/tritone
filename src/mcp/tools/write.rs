@@ -164,7 +164,7 @@ impl TritoneServer {
     }
 
     #[tool(
-        description = "Status of queued and recent writes: queued, sending, sent or failed, eta, sent_message_id, link, error, ack_error, and whether the queue is paused. A sent_message_id means it WAS sent: never resend."
+        description = "Status of queued and recent writes: queued, sending, sent, failed or unknown, eta, sent_message_id, link, error, ack_error, unseen, and whether the queue is paused. A sent_message_id means it WAS sent: never resend. unknown means it may have been sent: check the channel with read_history before queueing it again. unseen lists others' messages that arrived while the job waited (the send marked them read): show them to the user."
     )]
     async fn send_status(&self, Parameters(a): Parameters<SendStatusArgs>) -> Result<CallToolResult, McpError> {
         // Works while halted, so the user can see what went out.
@@ -175,9 +175,14 @@ impl TritoneServer {
     }
 
     #[tool(
-        description = "Continue after tritone stopped on a CAPTCHA, a locked account or a block. ONLY when the user explicitly says they did the check in the official Discord app and want tritone to continue. Lifts the stop and resumes queued jobs; the job that hit the error stays failed. Refuses while a new login is needed (run `tritone login`)."
+        description = "Continue after tritone stopped on a CAPTCHA, a locked account or a block. ONLY when the user explicitly says they did the check in the official Discord app and want tritone to continue. Lifts the stop and resumes queued jobs (after an edge block they still wait its Retry-After); the job that hit the error stays failed. Refuses while a new login is needed (run `tritone login`)."
     )]
     async fn resume_queue(&self) -> Result<CallToolResult, McpError> {
+        // The queue lifts the REST client's own halt too: hand it the current client.
+        let api = self.state.api.read().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(api) = api {
+            self.state.queue.attach(api);
+        }
         Ok(match self.state.queue.resume() {
             Ok(s) => json(&s),
             Err(e) => tool_error(e),

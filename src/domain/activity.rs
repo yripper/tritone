@@ -15,7 +15,7 @@ use crate::config::{Config, Topic};
 use crate::discord::types::{Channel, ChannelKind, DiscordError, Id, Message, SearchQuery, SearchScope};
 use crate::domain::clock::{GapRng, ThreadRng};
 use crate::domain::errors::{Error, Result};
-use crate::domain::live::{LiveEvent, LiveState};
+use crate::domain::live::{ConnState, LiveEvent, LiveState};
 use crate::domain::send_queue::halt_everything;
 use crate::mcp::state::Ctx;
 use crate::store::{ActivityRow, Store};
@@ -265,6 +265,11 @@ pub async fn backfill_with(ctx: &Ctx, key: &str, rng: &dyn GapRng) -> Result<Bac
         let mut p = load_progress(&ctx.store, &pkey)?;
         let mut waits = 0;
         while !p.done {
+            // Halted elsewhere (gateway, a tool): stop before the next search, keeping progress.
+            if let ConnState::Halted(e) = ctx.live.connection() {
+                tracing::warn!(kind = e.kind(), "backfill stopped: tritone is halted");
+                return Err(e.into());
+            }
             if !skip_wait {
                 let pause = rng.gap_ms(PAGE_WAIT_MIN_MS, PAGE_WAIT_MAX_MS) as i64;
                 ctx.timer.sleep_until(ctx.timer.now_ms() + pause).await;

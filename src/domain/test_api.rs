@@ -1,6 +1,7 @@
 //! A `FakeDiscord` wrapper for domain tests: stamps every call with the
 //! virtual time and fails chosen methods once.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use async_trait::async_trait;
@@ -23,15 +24,27 @@ pub struct Api {
     times: StdMutex<Vec<(Call, i64)>>,
     /// (method, nth, error): the nth next call of that method fails, once.
     fail: StdMutex<Vec<(&'static str, u32, DiscordError)>>,
+    /// How many times `clear_halt` was called.
+    cleared: AtomicU32,
 }
 
 impl Api {
     pub fn new(timer: Arc<FakeTimer>) -> Api {
-        Api { inner: FakeDiscord::default(), timer, times: StdMutex::new(Vec::new()), fail: StdMutex::new(Vec::new()) }
+        Api {
+            inner: FakeDiscord::default(),
+            timer,
+            times: StdMutex::new(Vec::new()),
+            fail: StdMutex::new(Vec::new()),
+            cleared: AtomicU32::new(0),
+        }
     }
 
     pub fn calls(&self) -> Vec<Call> {
         self.inner.calls()
+    }
+
+    pub fn cleared(&self) -> u32 {
+        self.cleared.load(Ordering::SeqCst)
     }
 
     pub fn fail_on(&self, method: &'static str, e: DiscordError) {
@@ -77,6 +90,10 @@ macro_rules! fwd {
 
 #[async_trait]
 impl DiscordApi for Api {
+    fn clear_halt(&self) {
+        self.cleared.fetch_add(1, Ordering::SeqCst);
+    }
+
     async fn history(&self, c: Id, b: Option<Id>, a: Option<Id>, l: u8) -> DResult<Vec<Message>> {
         fwd!(self, "history", self.inner.history(c, b, a, l))
     }

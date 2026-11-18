@@ -1,10 +1,12 @@
 //! SQLite store: triage state (watch levels, snoozes, categories), voice
 //! notes, opportunity ids and the contribution log. Never message text.
 
+mod activity;
 mod kv;
 mod schema;
 mod watch;
 
+pub use activity::ActivityRow;
 pub use watch::{TargetKind, WatchLevel};
 
 use std::path::Path;

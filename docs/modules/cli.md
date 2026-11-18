@@ -1,6 +1,6 @@
 # cli
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 The `tritone` binary: `start` (the daemon pm2 runs), `login [--token]`, `logout`, `status`, `token`.
@@ -14,12 +14,12 @@ The `tritone` binary: `start` (the daemon pm2 runs), `login [--token]`, `logout`
 ## Public surface
 - `Command` (`src/cli/mod.rs:23`). `login` and `logout` print "not implemented yet" for now.
 - `status` (`src/cli/mod.rs:49`): port, whether the bearer and the Discord token are stored. It never contacts Discord.
-- `ensure_bearer_token` (`src/cli/daemon.rs:21`): 32 random bytes as hex, created once in the keyring.
-- `start` (`src/cli/daemon.rs:39`), in order:
+- `ensure_bearer_token` (`src/cli/daemon.rs:22`): 32 random bytes as hex, created once in the keyring.
+- `start` (`src/cli/daemon.rs:40`), in order:
   1. binds `127.0.0.1:<port>`, which is the single-instance guard (a second daemon must never open a second gateway session);
   2. ensures the bearer token;
   3. opens the store and builds `AppState` (`LiveState` with `buffer_policy`, `SendQueue`, `SystemTimer`);
-  4. spawns `discord::gateway::spawn(state)` and `queue.run()`;
+  4. spawns the contribution log recorder (`domain::activity::spawn_recorder`, before the gateway so it sees every event), `discord::gateway::spawn(state)` and `queue.run()`;
   5. serves MCP.
 
 ## Dependencies

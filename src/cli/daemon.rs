@@ -7,6 +7,7 @@ use rand::RngCore;
 
 use crate::config::{Config, Paths};
 use crate::discord::gateway;
+use crate::domain::activity;
 use crate::domain::clock::{SystemTimer, ThreadRng, Timer};
 use crate::domain::live::{BufferPolicy, LiveState};
 use crate::domain::send_queue::SendQueue;
@@ -50,9 +51,11 @@ pub async fn start() -> Result<()> {
 
     let timer: Arc<dyn Timer> = Arc::new(SystemTimer);
     let live = Arc::new(LiveState::new(buffer_policy(&config)));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(ThreadRng)));
+    let queue =
+        Arc::new(SendQueue::new(store.clone(), live.clone(), config.clone(), timer.clone(), Arc::new(ThreadRng)));
     let state = AppState::new(store, secrets, live, queue.clone(), config.clone(), timer);
 
+    activity::spawn_recorder(state.live.clone(), state.store.clone(), config.clone());
     gateway::spawn(state.clone());
     tokio::spawn(queue.run());
     tracing::info!(port = config.port, "tritone listening on 127.0.0.1");

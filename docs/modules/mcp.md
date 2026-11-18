@@ -14,17 +14,18 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - Tests: `src/mcp/mcp_tests.rs`, `src/mcp/http_tests.rs`.
 
 ## Tools
-- `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `LiveState::try_login_with` accepts (not the rejected one, nor one already tried) wakes the gateway through `login_notify` and reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
+- `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `AppState::accept_login` takes (`LiveState::try_login_with` accepts it: not the rejected one, nor one already tried) drops the old REST client and wakes the gateway through `login_notify`, and `status` reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
 - The other groups are empty so far.
 
 ## Other routes
-- `POST /login-notify` (`src/mcp/http.rs:68`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: only while halted on `NeedsLogin` (any other halt, or a live connection → 409 asking for a restart, so a login can't lift a CAPTCHA or block halt or wake a healthy gateway); then a keyring token that `try_login_with` accepts → `set_api(None)` (the old client holds the dead token) and `notify_one` on `login_notify`, 200; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
+- `POST /login-notify` (`src/mcp/http.rs:68`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: only while halted on `NeedsLogin` (any other halt, or a live connection → 409 asking for a restart, so a login can't lift a CAPTCHA or block halt or wake a healthy gateway); then `AppState::accept_login` with the keyring token, 200 when it acts; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
 
 ## Key methods
 - `TritoneServer::tool_router` (`src/mcp/server.rs:38`): `status_router + read_router + triage_router + write_router + engage_router + activity_router`. Built once in `new` and kept in the struct.
 - `TritoneServer::run` (`src/mcp/server.rs:49`): gets a `Ctx` from `AppState::ctx` and runs the action. Results are pretty JSON (`json`, `src/mcp/server.rs:25`). Errors come back as **tool errors** (`is_error: true`) with text Claude can act on; only the error kind is logged.
-- `AppState::ctx` (`src/mcp/state.rs:74`): a halted connection returns its `DiscordError` (e.g. `NeedsLogin`, "run `tritone login`"); no REST client yet returns `NotConnected`.
-- `AppState::set_api` (`src/mcp/state.rs:67`): the gateway stores the REST client here once it has a token.
+- `AppState::ctx` (`src/mcp/state.rs:94`): a halted connection returns its `DiscordError` (e.g. `NeedsLogin`, "run `tritone login`"); no REST client yet returns `NotConnected`.
+- `AppState::accept_login(token)` (`src/mcp/state.rs:82`): the one place a login is accepted, shared by `status` and `/login-notify`: `try_login_with`, then `set_api(None)` (the old client holds the dead token), then `login_notify.notify_one()`. Callers check first that the connection is halted on `NeedsLogin`.
+- `AppState::set_api` (`src/mcp/state.rs:74`): the gateway stores the REST client here once it has a token.
 - `guard` (`src/mcp/http.rs:26`): 403 unless Host is `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding); 401 unless `Authorization: Bearer <token>`, compared in constant time; fails closed on an empty token.
 - `current_instructions` (`src/mcp/instructions.rs:72`): re-reads `~/.tritone/style.md` on every initialize and appends it as `## Writing style`.
 

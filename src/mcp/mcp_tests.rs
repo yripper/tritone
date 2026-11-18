@@ -136,6 +136,16 @@ async fn status_wakes_the_gateway_after_a_new_login() {
 }
 
 #[tokio::test]
+async fn status_accepting_a_login_drops_the_old_client() {
+    let state = test_state();
+    state.set_api(Some(Arc::new(crate::discord::fake::FakeDiscord::default())));
+    state.live.reject_token("tok-old");
+    state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok-new").await.unwrap();
+    assert_eq!(call_tool(state.clone(), "status").await["connection"], "connecting");
+    assert!(state.api.read().unwrap().is_none(), "the dead token's client is gone");
+}
+
+#[tokio::test]
 async fn status_never_rewakes_the_gateway_with_a_rejected_token() {
     let state = test_state();
     state.secrets.set(crate::secrets::ACCOUNT_TOKEN, "tok-dead").await.unwrap();

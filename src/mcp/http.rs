@@ -80,11 +80,7 @@ async fn login_notify(State(state): State<AppState>) -> (StatusCode, String) {
         }
     }
     match state.secrets.get(ACCOUNT_TOKEN).await {
-        Ok(Some(token)) if state.live.try_login_with(&token) => {
-            // The old client holds the dead token: drop it so nothing calls
-            // Discord with it before the gateway builds the new one.
-            state.set_api(None);
-            state.login_notify.notify_one();
+        Ok(Some(token)) if state.accept_login(&token) => {
             tracing::info!("new login; reconnecting");
             (StatusCode::OK, "tritone is reconnecting with the new login".into())
         }

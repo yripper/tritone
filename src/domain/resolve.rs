@@ -45,6 +45,52 @@ pub fn resolve_channel(query: &str, live: &LiveState) -> Result<Id> {
     pick(q, found)
 }
 
+/// A server by id, or by a case-insensitive part of its name (whole names
+/// win). Several matches are `Ambiguous`, labelled `Server (id)`.
+pub fn resolve_server(query: &str, live: &LiveState) -> Result<Id> {
+    let q = query.trim();
+    if q.is_empty() {
+        return Err(Error::Invalid("name a server: its id or part of its name".into()));
+    }
+    if let Some(id) = snowflake(q) {
+        return live.guild(id).map(|g| g.id).ok_or_else(|| Error::NotFound(q.to_string()));
+    }
+    let found = live
+        .guilds()
+        .into_iter()
+        .filter_map(|g| {
+            let exact = name_match(&g.name, q)?;
+            Some(Candidate { id: g.id, label: format!("{} ({})", g.name, g.id), exact })
+        })
+        .collect();
+    pick(q, found)
+}
+
+/// A person by id (passed through), or by a case-insensitive part of their
+/// username or display name among known users other than me (whole names
+/// win). Several matches are `Ambiguous`, labelled `Name (@username, id)`.
+pub fn resolve_user(query: &str, live: &LiveState) -> Result<Id> {
+    let q = query.trim().trim_start_matches('@');
+    if q.is_empty() {
+        return Err(Error::Invalid("name a person: their id, username or display name".into()));
+    }
+    if let Some(id) = snowflake(q) {
+        return Ok(id);
+    }
+    let me = live.me().map(|u| u.id);
+    let found = live
+        .users()
+        .into_iter()
+        .filter(|u| Some(u.id) != me)
+        .filter_map(|u| {
+            let by_display = u.display_name.as_deref().and_then(|d| name_match(d, q));
+            let exact = name_match(&u.username, q).into_iter().chain(by_display).reduce(|a, b| a || b)?;
+            Some(Candidate { id: u.id, label: format!("{} (@{}, {})", u.label(), u.username, u.id), exact })
+        })
+        .collect();
+    pick(q, found)
+}
+
 /// A bare decimal id.
 pub(crate) fn snowflake(s: &str) -> Option<Id> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
@@ -128,8 +174,30 @@ fn group_dm_matches(q: &str, live: &LiveState) -> Vec<Candidate> {
 }
 
 /// A group DM's name, else its people.
-pub(crate) fn group_label(c: &Channel) -> String {
+fn group_label(c: &Channel) -> String {
     c.name.clone().unwrap_or_else(|| c.recipients.iter().map(|u| u.label()).collect::<Vec<_>>().join(", "))
+}
+
+/// How a channel is shown: `@user (DM)`, `name (group DM)`,
+/// `Server › #channel`, or `Server › #parent › thread`.
+pub fn channel_label(c: &Channel, live: &LiveState) -> String {
+    match c.kind {
+        ChannelKind::Dm => {
+            let who = c.recipients.first().map_or("unknown-user", |u| u.label());
+            format!("@{who} (DM)")
+        }
+        ChannelKind::GroupDm => format!("{} (group DM)", group_label(c)),
+        _ => {
+            let name = c.name.as_deref().unwrap_or("unknown-channel");
+            let server =
+                c.guild_id.and_then(|g| live.guild(g)).map_or_else(|| "unknown-server".to_string(), |g| g.name);
+            let parent = c.parent_id.filter(|_| c.kind.is_thread()).and_then(|p| live.channel(p)).and_then(|p| p.name);
+            match parent {
+                Some(p) => format!("{server} › #{p} › {name}"),
+                None => format!("{server} › #{name}"),
+            }
+        }
+    }
 }
 
 /// Exact names win over partial ones; one left is the answer.

@@ -108,3 +108,27 @@ fn categories_and_nameless_channels_never_match() {
     assert!(matches!(resolve_channel("", &l), Err(Error::Invalid(_))));
     assert!(matches!(resolve_channel("#", &l), Err(Error::Invalid(_))));
 }
+
+#[test]
+fn servers_resolve_by_id_or_name() {
+    let l = world();
+    assert_eq!(resolve_server("2", &l).unwrap(), Id(2));
+    assert_eq!(resolve_server("rust", &l).unwrap(), Id(2));
+    assert_eq!(resolve_server("G001", &l).unwrap(), Id(1), "exact beats G0010-style substrings");
+    let c = candidates(resolve_server("G0", &l).unwrap_err());
+    assert_eq!(c.len(), 10);
+    assert_eq!(c[0], "G001 (1)");
+    assert!(matches!(resolve_server("999", &l), Err(Error::NotFound(_))));
+    assert!(matches!(resolve_server("nope", &l), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn users_resolve_by_id_or_unique_name() {
+    let l = world();
+    assert_eq!(resolve_user("3", &l).unwrap(), Id(3));
+    assert_eq!(resolve_user("@sam", &l).unwrap(), Id(3));
+    assert_eq!(resolve_user("u002", &l).unwrap(), Id(2));
+    let c = candidates(resolve_user("U00", &l).unwrap_err());
+    assert_eq!(c, vec!["Sam (@U003, 3)".to_string(), "U002 (@U002, 2)".to_string(), "U004 (@U004, 4)".to_string()]);
+    assert!(matches!(resolve_user("zed", &l), Err(Error::NotFound(_))));
+}

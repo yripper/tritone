@@ -7,7 +7,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 
 ## Structure
 - `src/mcp/server.rs`: `TritoneServer`, `tool_router()` (merges the group routers with `+`), `run`, `json`, and the `ServerHandler` impl.
-- `src/mcp/tools/`: one `#[tool_router(router = <group>_router, vis = "pub(crate)")] impl TritoneServer` per file: `status.rs`, `read.rs`, `triage.rs`, `write.rs`, `engage.rs`, `activity.rs`.
+- `src/mcp/tools/`: one `#[tool_router(router = <group>_router, vis = "pub(crate)")] impl TritoneServer` per file: `status.rs`, `read.rs`, `triage.rs`, `write.rs`, `engage.rs`, `activity.rs`. Tests for the read and triage tools: `src/mcp/tools/read_tests.rs`.
 - `src/mcp/state.rs`: `AppState`, `Ctx`.
 - `src/mcp/http.rs`: `guard_router` (Host + bearer), `app` (the guarded `/mcp` service) and `serve` (graceful shutdown on SIGTERM/SIGINT).
 - `src/mcp/instructions.rs`: `BASE_INSTRUCTIONS`, `build_instructions`, `read_style_guide`, `current_instructions`.
@@ -15,7 +15,19 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 
 ## Tools
 - `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `LiveState::try_login_with` accepts (not the rejected one, nor one already tried) wakes the gateway through `login_notify` and reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
-- The other groups are empty so far.
+- **Read** (`src/mcp/tools/read.rs`). Channel arguments go through `resolve_channel` (id, link, `#name`, `server/#name`, `@user`, part of a name); an ambiguous name is a tool error listing the candidates with ids, and nothing is read.
+  - `list_servers{include_muted?}` (`src/mcp/tools/read.rs:101`) → `{servers}`.
+  - `list_channels{kind? (dm|group_dm|server|thread), server?, watch?}` (`src/mcp/tools/read.rs:114`) → `{channels, truncated}`, at most 300.
+  - `get_pending` (`src/mcp/tools/read.rs:130`) → `{pending: [{channel, label, reason, unread_count_hint, mention_count, messages, more_unread, error?}]}`. Never acks.
+  - `read_history{channel, limit=50, before?, peek=false}` (`src/mcp/tools/read.rs:137`): marks read unless `peek` or `before`.
+  - `read_thread{thread, limit=50, peek=false}` (`src/mcp/tools/read.rs:148`).
+  - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages).
+  - `get_channel_info{channel}` (`src/mcp/tools/read.rs:194`), `find_user{query}` (`src/mcp/tools/read.rs:206`) → `{users}`.
+- **Triage** (`src/mcp/tools/triage.rs`):
+  - `mark_read{channels[]}` (`src/mcp/tools/triage.rs:83`): every name must resolve first, or nothing is acked; → `{marked, already_read}`.
+  - `snooze{channel, until}` (`src/mcp/tools/triage.rs:93`): `until` is RFC 3339 with offset; past times are refused. `unsnooze{channel}` (`src/mcp/tools/triage.rs:104`).
+  - `set_watch_level{target, level: full|normal|muted|clear}` (`src/mcp/tools/triage.rs:117`): channel-shaped targets (`#`, `@`, `/#`, links) are channels; a bare id is whichever exists; otherwise a server name, then a channel name (`resolve_target`, `src/mcp/tools/triage.rs:55`). → `{target, kind: server|channel, level}`.
+- The write, engage and activity groups belong to other modules.
 
 ## Key methods
 - `TritoneServer::tool_router` (`src/mcp/server.rs:38`): `status_router + read_router + triage_router + write_router + engage_router + activity_router`. Built once in `new` and kept in the struct.
@@ -37,4 +49,4 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - Halt contract (`src/mcp/state.rs:7`): a dead token calls `live.reject_token(token)`, any other halting error `live.halt(e)`; `ctx()` refuses while halted, across gateway reconnects.
 
 ## Testing
-`cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.
+`cargo test --lib -- tools::read` runs the read and triage tools over HTTP against `FakeDiscord`. `cargo test mcp`: the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.

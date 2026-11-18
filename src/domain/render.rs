@@ -73,7 +73,7 @@ pub fn message_link(guild: Option<Id>, channel: Id, message: Id) -> String {
     format!("https://discord.com/channels/{g}/{channel}/{message}")
 }
 
-fn rfc3339(ms: i64) -> String {
+pub(crate) fn rfc3339(ms: i64) -> String {
     DateTime::from_timestamp_millis(ms).map_or_else(String::new, |d| d.to_rfc3339_opts(SecondsFormat::Secs, true))
 }
 

@@ -129,8 +129,9 @@ pub fn full_watch(c: &Channel, watch: &WatchMap) -> bool {
 
 /// Handles one live message:
 /// - the user's own: recorded in `own_message` (ids and time); it answers
-///   the opportunity it replies to and every open one in that channel for an
-///   older message (the user has spoken there since, quote or not);
+///   the opportunity it replies to, and in a thread every open one there for
+///   an older message (quote or not). In a main channel it closes nothing
+///   else;
 /// - someone else's, in a full-watch server channel: stored as an open
 ///   opportunity when a rule matches. A thread keeps one open `my_thread`
 ///   row, its newest, so one busy thread can't fill the list.
@@ -151,7 +152,12 @@ pub fn scan_message(
         if let Some(r) = msg.reply_to {
             store.opportunity_answered(r, at)?;
         }
-        store.opportunities_answered_before(msg.channel_id, msg.id, at)?;
+        // In a thread the user is part of the conversation, so their message
+        // answers what came before it there. In a main channel it may be
+        // unrelated chat: only a reply answers, above.
+        if channel.as_ref().is_some_and(|c| c.kind.is_thread()) {
+            store.opportunities_answered_before(msg.channel_id, msg.id, at)?;
+        }
         return Ok(());
     }
     let (Some(guild), Some(channel), Some(me)) = (guild, channel, live.me()) else { return Ok(()) };

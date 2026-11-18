@@ -318,25 +318,39 @@ async fn a_busy_thread_keeps_one_open_row() {
 }
 
 #[tokio::test]
-async fn my_message_closes_older_rows_in_that_channel() {
+async fn my_message_in_a_thread_closes_older_rows_there() {
     let r = rig();
-    let q = gmsg(60, 100, 2, "how do I do this?");
-    let t = gmsg(55, 100, 3, "rust is neat");
     arrive(&r, &gmsg(90, 150, ME, "my take"));
     let in_thread = gmsg(50, 150, 4, "and then?");
-    arrive(&r, &q);
-    arrive(&r, &t);
+    let q = gmsg(48, 100, 2, "how do I do this?");
     arrive(&r, &in_thread);
+    arrive(&r, &q);
     // Written in a Discord app, no reply-quote.
-    arrive(&r, &gmsg(45, 100, ME, "you can do it like this"));
-    let later = gmsg(40, 100, 5, "why does it fail?");
+    arrive(&r, &gmsg(45, 150, ME, "then this"));
+    let later = gmsg(40, 150, 5, "got it, but why?");
     arrive(&r, &later);
 
     let status = |m: &Message| r.ctx.store.opportunity(m.id).unwrap().unwrap().status;
-    assert_eq!((status(&q), status(&t)), (OpportunityStatus::Answered, OpportunityStatus::Answered));
+    assert_eq!(status(&in_thread), OpportunityStatus::Answered);
     assert_eq!(status(&later), OpportunityStatus::Open, "newer than my message");
-    assert_eq!(status(&in_thread), OpportunityStatus::Open, "another channel");
-    assert_eq!(ids(&get_opportunities(&r.ctx, 15).await.unwrap()), [later.id, in_thread.id]);
+    assert_eq!(status(&q), OpportunityStatus::Open, "another channel");
+}
+
+#[tokio::test]
+async fn own_message_in_main_channel_keeps_other_questions_open() {
+    let r = rig();
+    let q = gmsg(60, 100, 2, "how do I do this?");
+    let t = gmsg(55, 100, 3, "rust is neat");
+    arrive(&r, &q);
+    arrive(&r, &t);
+    // Unrelated chat in the main channel answers nothing.
+    arrive(&r, &gmsg(50, 100, ME, "good morning"));
+    let status = |m: &Message| r.ctx.store.opportunity(m.id).unwrap().unwrap().status;
+    assert_eq!((status(&q), status(&t)), (OpportunityStatus::Open, OpportunityStatus::Open));
+    // A reply answers only what it replies to.
+    arrive(&r, &reply(gmsg(45, 100, ME, "it is"), &t));
+    assert_eq!((status(&q), status(&t)), (OpportunityStatus::Open, OpportunityStatus::Answered));
+    assert_eq!(ids(&get_opportunities(&r.ctx, 15).await.unwrap()), [q.id]);
 }
 
 #[tokio::test]

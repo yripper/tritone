@@ -137,8 +137,8 @@ impl Store {
         Ok(n == 1)
     }
 
-    /// The user wrote `own` in `channel`: every open row there for an older
-    /// message is answered, reply-quote or not. Returns how many.
+    /// The user wrote `own` in `channel` (a thread): every open row there for
+    /// an older message is answered, reply-quote or not. Returns how many.
     pub fn opportunities_answered_before(&self, channel: Id, own: Id, now_ms: i64) -> Result<usize> {
         Ok(self.conn().execute(
             "UPDATE opportunity SET status = 'answered', updated_at = ?3

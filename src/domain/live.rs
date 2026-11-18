@@ -167,6 +167,18 @@ impl LiveState {
                     g.my_roles = roles;
                 }
             }
+            GatewayEvent::RoleUpsert { guild, role } => {
+                if let Some(g) = self.lock().guilds.get_mut(&guild) {
+                    g.roles.retain(|r| r.id != role.id);
+                    g.roles.push(role);
+                }
+            }
+            GatewayEvent::RoleDelete { guild, role } => {
+                if let Some(g) = self.lock().guilds.get_mut(&guild) {
+                    g.roles.retain(|r| r.id != role);
+                    g.my_roles.retain(|r| *r != role);
+                }
+            }
             GatewayEvent::GuildDelete(id) => {
                 let mut inner = self.lock();
                 inner.guilds.remove(&id);

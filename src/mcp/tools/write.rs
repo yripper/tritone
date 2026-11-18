@@ -9,6 +9,8 @@ use serde::Deserialize;
 use crate::discord::types::{ChannelKind, Id};
 use crate::domain::errors::{Error, Result as DResult};
 use crate::domain::live::LiveState;
+use crate::domain::render::to_discord_mentions;
+use crate::domain::resolve::resolve_channel;
 use crate::domain::send_queue::JobSpec;
 use crate::mcp::server::{TritoneServer, json};
 use crate::mcp::state::Ctx;
@@ -59,18 +61,12 @@ pub struct SendStatusArgs {
     pub job_id: Option<u64>,
 }
 
-/// A channel id from an id or a `discord.com/channels/g/c[/m]` link, known
-/// to the live model.
-// TODO(resolve): switch to the shared channel resolver (names, #channel, @user) once it lands.
+/// The channel to write to, through the shared resolver: id, link, `#name`,
+/// `server/#name`, `@user` or part of a name. Several matches are an
+/// `Ambiguous` error listing them: a write never guesses. Unlike a read, a
+/// write also refuses an id the live model doesn't hold.
 fn target(query: &str, live: &LiveState) -> DResult<Id> {
-    let q = query.trim();
-    let raw = match q.find("discord.com/channels/") {
-        Some(at) => q[at..].split('/').nth(3).unwrap_or_default(),
-        None => q.trim_start_matches(['#', '<', '>']).trim_end_matches('>'),
-    };
-    let id: Id = raw
-        .parse()
-        .map_err(|_| Error::Invalid(format!("\"{query}\" is not a channel id or link: pass the channel's id")))?;
+    let id = resolve_channel(query, live)?;
     if live.channel(id).is_none() {
         return Err(Error::NotFound(query.to_string()));
     }
@@ -78,10 +74,8 @@ fn target(query: &str, live: &LiveState) -> DResult<Id> {
 }
 
 /// Outgoing text with `@username` turned into mentions where unambiguous.
-// TODO(mentions): call `domain::render::to_discord_mentions(text, live, guild)` once it lands.
 fn outgoing_text(text: &str, live: &LiveState, guild: Option<Id>) -> String {
-    let _ = (live, guild);
-    text.to_string()
+    to_discord_mentions(text, live, guild)
 }
 
 fn guild_of(live: &LiveState, channel: Id) -> Option<Id> {

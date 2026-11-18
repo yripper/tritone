@@ -50,7 +50,8 @@ pub async fn start() -> Result<()> {
 
     let timer: Arc<dyn Timer> = Arc::new(SystemTimer);
     let live = Arc::new(LiveState::new(buffer_policy(&config)));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(ThreadRng)));
+    let queue =
+        Arc::new(SendQueue::new(store.clone(), live.clone(), config.clone(), timer.clone(), Arc::new(ThreadRng)));
     let state = AppState::new(store, secrets, live, queue.clone(), config.clone(), timer);
 
     gateway::spawn(state.clone());

@@ -10,6 +10,7 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 - `src/store/schema.rs`: append-only `MIGRATIONS`, tracked with `PRAGMA user_version`.
 - `src/store/kv.rs`: `kv_get`, `kv_set`.
 - `src/store/watch.rs`: `WatchLevel`, `TargetKind`, watch levels and snoozes.
+- `src/store/activity.rs`: the contribution log (`ActivityRow`). Tests: `src/store/activity_tests.rs`.
 - `src/store/store_tests.rs`: tests.
 
 ## Schema v1 (`src/store/schema.rs:6`)
@@ -23,6 +24,8 @@ All tables are created in v1, so features add methods, not migrations:
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:42`).
 - `get_watch`, `set_watch` (`None` clears), `all_watch` (`src/store/watch.rs:61`, `:70`, `:84`).
 - `set_snooze` (Unix ms; `None` unsnoozes), `snoozed_until` (returns the stored time even if past) (`src/store/watch.rs:93`, `:107`).
+- `ActivityRow { message_id, guild_id, channel_id, created_at, kind, is_reply, via_tritone }` (`src/store/activity.rs:11`).
+- `record_activity(&row) -> bool` (`src/store/activity.rs:43`): insert-or-ignore, true when inserted. `mark_sent_via_tritone(id) -> bool` (`src/store/activity.rs:63`): false when there's no row yet. `set_activity_kind(id, kind)` (`src/store/activity.rs:72`). `activity_between(from_ms, to_ms)` (`src/store/activity.rs:79`): `from <= created_at < to`, newest first.
 
 ## Dependencies
 rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.

@@ -470,6 +470,23 @@ fn guild_and_channel_lifecycle() {
 }
 
 #[test]
+fn thread_membership_survives_upserts_until_it_changes() {
+    let l = ready_live();
+    let thread =
+        Channel { kind: ChannelKind::PublicThread, parent_id: Some(Id(101)), joined: true, ..text_channel(110, 1) };
+    l.apply(GatewayEvent::ChannelUpsert(thread.clone()), NOW);
+    // THREAD_UPDATE carries no membership: it keeps what's known.
+    l.apply(GatewayEvent::ChannelUpsert(Channel { joined: false, ..thread.clone() }), NOW);
+    assert!(l.channel(Id(110)).unwrap().joined);
+    l.apply(GatewayEvent::ThreadMembership { thread: Id(110), joined: false }, NOW);
+    assert!(!l.channel(Id(110)).unwrap().joined);
+    l.apply(GatewayEvent::ThreadMembership { thread: Id(110), joined: true }, NOW);
+    assert!(l.channel(Id(110)).unwrap().joined);
+    l.apply(GatewayEvent::ThreadMembership { thread: Id(999), joined: true }, NOW);
+    assert!(l.channel(Id(999)).is_none(), "an unknown thread isn't invented");
+}
+
+#[test]
 fn role_events_change_visibility() {
     let l = ready_live();
     l.apply(GatewayEvent::MyRolesUpdate { guild: Id(1), roles: vec![Id(900)] }, NOW);

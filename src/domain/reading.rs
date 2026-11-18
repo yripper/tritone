@@ -123,10 +123,10 @@ pub async fn search(ctx: &Ctx, scope: SearchScope, query: &SearchQuery) -> Resul
     })
 }
 
-fn unread_channels(live: &LiveState, guild: Id) -> u32 {
+fn unread_channels(live: &LiveState, watch: &WatchMap, guild: Id) -> u32 {
     live.channels()
         .iter()
-        .filter(|c| c.guild_id == Some(guild) && listable(c) && live.can_view(c.id) && live.is_unread(c.id))
+        .filter(|c| c.guild_id == Some(guild) && listable(c, watch) && live.can_view(c.id) && live.is_unread(c.id))
         .count() as u32
 }
 
@@ -142,7 +142,7 @@ pub fn list_servers(live: &LiveState, store: &Store, now_ms: i64, include_muted:
             id: g.id,
             watch: watch.guilds.get(&g.id).copied(),
             discord_muted: live.settings(Some(g.id)).is_some_and(|s| s.muted.active(now_ms)),
-            unread_channels: unread_channels(live, g.id),
+            unread_channels: unread_channels(live, &watch, g.id),
             name: g.name,
         })
         .collect();
@@ -205,7 +205,7 @@ pub fn list_channels(
     let levels = store.all_watch()?;
     let mut out = Vec::new();
     for c in live.channels() {
-        if !listable(&c) || !live.can_view(c.id) || kind.is_some_and(|k| !kind_matches(&c, k)) {
+        if !listable(&c, &levels) || !live.can_view(c.id) || kind.is_some_and(|k| !kind_matches(&c, k)) {
             continue;
         }
         if server.is_some_and(|s| c.guild_id != Some(s)) {

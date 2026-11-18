@@ -110,6 +110,8 @@ fn parse_ready_core_fields() {
 
     let t = snap.channels.iter().find(|c| c.id == Id(110)).unwrap();
     assert_eq!((t.kind, t.guild_id, t.parent_id), (ChannelKind::PublicThread, Some(Id(10)), Some(Id(100))));
+    assert!(t.joined, "READY only carries threads the user is in");
+    assert!(!c100.joined);
     assert_eq!(snap.channels.iter().find(|c| c.id == Id(200)).unwrap().kind, ChannelKind::Announcement);
 }
 

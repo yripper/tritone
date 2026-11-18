@@ -94,11 +94,17 @@ fn watch_of(c: &Channel, live: &LiveState, watch: &WatchMap, now_ms: i64) -> (Wa
     }
 }
 
-/// Channels that show up in pending and listings: no categories, and no
-/// server channel without a name (a phantom made by a message in a channel
-/// tritone never saw).
-pub(crate) fn listable(c: &Channel) -> bool {
-    c.kind != ChannelKind::Category && (c.guild_id.is_none() || c.name.is_some())
+/// Channels that show up in pending and listings: no categories, no server
+/// channel without a name (a phantom made by a message in a channel tritone
+/// never saw), and no thread the user hasn't joined (they see every active
+/// thread, like Discord, which doesn't count those as unread either) unless
+/// tritone's watch on it is full: in a help forum on full watch every
+/// question is a thread the user never joined, and those must show. A direct
+/// mention or reply in an unjoined thread still reaches pending, as an
+/// unlisted ping.
+pub(crate) fn listable(c: &Channel, watch: &WatchMap) -> bool {
+    let theirs = !c.kind.is_thread() || c.joined || explicit_watch(c, watch) == Some(WatchLevel::Full);
+    c.kind != ChannelKind::Category && (c.guild_id.is_none() || c.name.is_some()) && theirs
 }
 
 /// What the unread messages in hand (buffered, plus the mentions inbox) say.
@@ -179,7 +185,7 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
     let watch = store.all_watch()?;
     let mut found: Vec<(u8, Option<Id>, PendingItem)> = Vec::new();
     for c in live.channels() {
-        if !listable(&c) || !live.can_view(c.id) || !live.is_unread(c.id) {
+        if !listable(&c, &watch) || !live.can_view(c.id) || !live.is_unread(c.id) {
             continue;
         }
         if store.snoozed_until(c.id)?.is_some_and(|t| t > now_ms) {
@@ -237,12 +243,12 @@ pub fn pending(live: &LiveState, store: &Store, mentions: &[Message], now_ms: i6
 }
 
 /// Label of an entry for a channel tritone doesn't hold (or holds without a
-/// name): an archived or unjoined thread, usually.
+/// name): an archived or unknown thread, usually.
 const UNLISTED: &str = "(thread or unknown channel)";
 
 /// Whether `pending` handles the channel itself, or it's unknown or nameless.
-fn unlisted(live: &LiveState, channel: Id) -> bool {
-    live.channel(channel).is_none_or(|c| !listable(&c))
+fn unlisted(live: &LiveState, watch: &WatchMap, channel: Id) -> bool {
+    live.channel(channel).is_none_or(|c| !listable(&c, watch))
 }
 
 /// The inbox's direct mentions and replies to the user in unlisted
@@ -258,7 +264,7 @@ fn unlisted_pings(
     now_ms: i64,
 ) -> Result<Vec<(u8, Option<Id>, PendingItem)>> {
     let mut by_channel: Vec<(Id, Vec<&Message>)> = Vec::new();
-    for m in mentions.iter().filter(|m| unlisted(live, m.channel_id)) {
+    for m in mentions.iter().filter(|m| unlisted(live, watch, m.channel_id)) {
         let direct = m.mentions.contains(&me) || m.reply_to_author == Some(me);
         let read = live.read_state(m.channel_id).last_acked.is_some_and(|a| a >= m.id);
         if !direct || read {
@@ -281,9 +287,14 @@ fn unlisted_pings(
         }
         let direct = msgs.iter().filter(|m| m.mentions.contains(&me)).count() as u32;
         let server = guild.and_then(|g| live.guild(g)).map_or_else(|| "unknown-server".to_string(), |g| g.name);
+        // An unjoined thread tritone knows has a real name.
+        let label = match live.channel(channel).filter(|c| c.name.is_some()) {
+            Some(c) => channel_label(&c, live),
+            None => format!("{server} › {UNLISTED}"),
+        };
         let item = PendingItem {
             channel,
-            label: format!("{server} › {UNLISTED}"),
+            label,
             reason: if direct > 0 { Reason::Mention } else { Reason::Reply },
             unread_count_hint: msgs.len() as u32,
             mention_count: msgs.len() as u32,
@@ -297,13 +308,14 @@ fn unlisted_pings(
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingReport {
     pub pending: Vec<PendingEntry>,
-    /// The mentions inbox had more within its 7 days than `MAX_INBOX_PAGES`
-    /// pages: older mentions in Discord-muted channels may be missing.
+    /// The mentions inbox wasn't read whole for its 7 days (more than
+    /// `MAX_INBOX_PAGES` pages, or a page failed): older mentions in
+    /// Discord-muted channels may be missing.
     pub truncated: bool,
 }
 
 /// The mentions inbox of the last 7 days, newest first, and whether the page
-/// cap stopped it. Role and @everyone pings share the inbox, so a direct
+/// cap or a failed page stopped it. Role and @everyone pings share the inbox, so a direct
 /// mention can sit several pages down.
 async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
     let since = now - MENTIONS_WINDOW_MS;
@@ -312,10 +324,11 @@ async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
         let page = match ctx.api.recent_mentions(INBOX_PAGE, before).await {
             Ok(p) => p,
             Err(e) if e.halts() => return Err(e.into()),
-            // Read states and the buffer still work without (the rest of) the inbox.
+            // Read states and the buffer still work without (the rest of) the
+            // inbox, but the 7 days weren't read whole: say so.
             Err(e) => {
                 tracing::warn!(kind = e.kind(), "recent mentions failed");
-                return Ok((all, false));
+                return Ok((all, true));
             }
         };
         let full = page.len() == usize::from(INBOX_PAGE);
@@ -337,10 +350,11 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
     let (mentions, truncated) = inbox(ctx, now).await?;
     ctx.live.note_authors(&mentions);
     let Some(me) = ctx.live.me().map(|u| u.id) else { return Ok(PendingReport { pending: vec![], truncated }) };
+    let watch = ctx.store.all_watch()?;
     let (mut kept, mut calls) = (0, 0);
     let mut out = Vec::new();
     for item in pending(&ctx.live, &ctx.store, &mentions, now)? {
-        if unlisted(&ctx.live, item.channel) {
+        if unlisted(&ctx.live, &watch, item.channel) {
             // Only the inbox's messages are known: show them, with their links.
             let mut msgs: Vec<&Message> = mentions.iter().filter(|m| m.channel_id == item.channel).collect();
             msgs.sort_by_key(|m| m.id);

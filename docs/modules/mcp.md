@@ -18,7 +18,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - **Read** (`src/mcp/tools/read.rs`). Channel arguments go through `resolve_channel` (id, link, `#name`, `server/#name`, `@user`, part of a name); an ambiguous name is a tool error listing the candidates with ids, and nothing is read.
   - `list_servers{include_muted?}` (`src/mcp/tools/read.rs:101`) → `{servers}`.
   - `list_channels{kind? (dm|group_dm|server|thread), server?, watch?}` (`src/mcp/tools/read.rs:114`) → `{channels, truncated}`, at most 300.
-  - `get_pending` (`src/mcp/tools/read.rs:130`) → `{pending: [{channel, label, reason, unread_count_hint, mention_count, messages, more_unread, pings?, error?}], truncated}` (`truncated`: the mentions inbox had more than 5 pages within 7 days). Never acks.
+  - `get_pending` (`src/mcp/tools/read.rs:130`) → `{pending: [{channel, label, reason, unread_count_hint, mention_count, messages, more_unread, pings?, error?}], truncated}` (`truncated`: the mentions inbox wasn't read whole for its 7 days: more than 5 pages, or a page failed). Never acks.
   - `read_history{channel, limit=50, before?, peek=false}` (`src/mcp/tools/read.rs:137`): marks read unless `peek` or `before`.
   - `read_thread{thread, limit=50, peek=false}` (`src/mcp/tools/read.rs:148`).
   - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages).

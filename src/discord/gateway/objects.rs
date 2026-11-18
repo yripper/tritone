@@ -95,14 +95,17 @@ pub(crate) fn parse_guild(v: &Value, my_roles: Vec<Id>) -> Option<Guild> {
     })
 }
 
-/// The guild's channels plus the threads the user has joined.
+/// The guild's channels plus the threads the user has joined: READY and
+/// GUILD_CREATE only sync joined threads to user accounts
+/// (https://docs.discord.food/gateway/gateway-events#ready).
 pub(crate) fn guild_channels(v: &Value, guild: Id) -> Vec<Channel> {
     let none = HashMap::new();
-    array_at(v, "channels")
+    let channels = array_at(v, "channels").iter().filter_map(|c| parse_channel(c, Some(guild), &none));
+    let threads = array_at(v, "threads")
         .iter()
-        .chain(array_at(v, "threads"))
         .filter_map(|c| parse_channel(c, Some(guild), &none))
-        .collect()
+        .map(|t| Channel { joined: true, ..t });
+    channels.chain(threads).collect()
 }
 
 /// The user's roles from a guild's member entries (`merged_members`, or

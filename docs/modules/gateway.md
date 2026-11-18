@@ -13,7 +13,7 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 - `src/discord/gateway/zlib.rs`: `zlib-stream` inflater, one per connection.
 - `src/discord/gateway/ready.rs`: `parse_ready`, `supplemental_roles`.
 - `src/discord/gateway/events.rs`: `GatewayEvent` and `parse_dispatch`.
-- `src/discord/gateway/objects.rs`: JSON → guild, role, settings, and channel with gateway context. It builds on `discord::parse`.
+- `src/discord/gateway/objects.rs`: JSON → guild, role, settings, and channel with gateway context. It builds on `discord::parse`. `parse_role` (`src/discord/gateway/objects.rs:65`) keeps `id`, `name` (empty when missing) and `permissions`; READY, GUILD_CREATE, GUILD_UPDATE and GUILD_ROLE_CREATE/UPDATE all go through it, so `Role.name` is filled everywhere.
 - `src/discord/gateway/subscribe.rs`: miss detection, op 37, full-watch channels.
 
 ## Public surface

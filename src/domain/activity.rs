@@ -13,23 +13,15 @@ use tokio::task::JoinHandle;
 
 use crate::config::{Config, Topic};
 use crate::discord::types::{Channel, ChannelKind, DiscordError, Id, Message, SearchQuery, SearchScope};
-use crate::domain::clock::{GapRng, ThreadRng};
 use crate::domain::errors::{Error, Result};
 use crate::domain::live::{ConnState, LiveEvent, LiveState};
-use crate::domain::send_queue::halt_everything;
+use crate::domain::paced_search::SearchPacer;
 use crate::mcp::state::Ctx;
 use crate::store::{ActivityRow, Store};
 
-/// Random wait between two search pages.
-pub const PAGE_WAIT_MIN_MS: u64 = 3_000;
-pub const PAGE_WAIT_MAX_MS: u64 = 6_000;
 /// Discord search refuses offsets past this; deeper pages use a `max_id` cursor.
 /// https://docs.discord.food/resources/message#search-guild-messages
 const MAX_SEARCH_OFFSET: u32 = 9_975;
-/// Waits for an index or a rate limit before a run gives up (progress is kept).
-const MAX_WAITS_PER_GUILD: u32 = 10;
-/// Used when Discord says to retry after 0 s.
-const DEFAULT_RETRY_S: u64 = 5;
 /// Links listed by `my_activity`.
 const MAX_LINKS: usize = 50;
 
@@ -247,36 +239,29 @@ pub fn backfill_progress(store: &Store, live: &LiveState, key: &str) -> Result<B
 }
 
 /// Logs the user's older server messages, guild by guild, through Discord
-/// search (`author_id` = me, 25 per page), one search at a time with a random
-/// 3–6 s wait between pages. Resumable: progress lives in `kv`. Waits out an
-/// index that isn't ready and a rate limit; a halting error halts tritone and
-/// stops the run.
+/// search (`author_id` = me, 25 per page) through the shared `SearchPacer`,
+/// so it never runs alongside another search: 3–6 s between searches, an
+/// index that isn't ready or a rate limit waited out by the pacer.
+/// Resumable: progress lives in `kv`. A halting error halts tritone and
+/// stops the run; any other error stops it with progress kept.
 pub async fn backfill(ctx: &Ctx, progress_key: &str) -> Result<BackfillReport> {
-    backfill_with(ctx, progress_key, &ThreadRng).await
+    backfill_with(ctx, progress_key, SearchPacer::global()).await
 }
 
-pub async fn backfill_with(ctx: &Ctx, key: &str, rng: &dyn GapRng) -> Result<BackfillReport> {
+pub async fn backfill_with(ctx: &Ctx, key: &str, pacer: &SearchPacer) -> Result<BackfillReport> {
     let me = ctx.live.me().ok_or(Error::NotConnected)?.id;
     let mut recorded = 0;
-    // The first search of a run, and one right after a Retry-After wait, skip the page wait.
-    let mut skip_wait = true;
     for g in guild_ids(&ctx.live) {
         let pkey = progress_key(key, g);
         let mut p = load_progress(&ctx.store, &pkey)?;
-        let mut waits = 0;
         while !p.done {
             // Halted elsewhere (gateway, a tool): stop before the next search, keeping progress.
             if let ConnState::Halted(e) = ctx.live.connection() {
                 tracing::warn!(kind = e.kind(), "backfill stopped: tritone is halted");
                 return Err(e.into());
             }
-            if !skip_wait {
-                let pause = rng.gap_ms(PAGE_WAIT_MIN_MS, PAGE_WAIT_MAX_MS) as i64;
-                ctx.timer.sleep_until(ctx.timer.now_ms() + pause).await;
-            }
-            skip_wait = false;
             let q = SearchQuery { author_id: Some(me), offset: p.offset, max_id: p.max_id, ..SearchQuery::default() };
-            match ctx.api.search(SearchScope::Guild(g), &q).await {
+            match pacer.search(ctx, SearchScope::Guild(g), &q).await {
                 Ok(page) => {
                     for m in &page.messages {
                         recorded += usize::from(record_own(
@@ -301,25 +286,15 @@ pub async fn backfill_with(ctx: &Ctx, key: &str, rng: &dyn GapRng) -> Result<Bac
                     }
                     save_progress(&ctx.store, &pkey, &p)?;
                 }
-                Err(DiscordError::Indexing { retry_after_s } | DiscordError::RateLimited { retry_after_s })
-                    if waits < MAX_WAITS_PER_GUILD =>
-                {
-                    waits += 1;
-                    let wait_s = if retry_after_s == 0 { DEFAULT_RETRY_S } else { retry_after_s };
-                    ctx.timer.sleep_until(ctx.timer.now_ms() + wait_s as i64 * 1000).await;
-                    skip_wait = true;
-                }
                 // No access to search there (or the server is gone): skip it.
-                Err(DiscordError::Forbidden | DiscordError::NotFound) => {
+                Err(Error::Discord(DiscordError::Forbidden | DiscordError::NotFound)) => {
                     p.done = true;
                     save_progress(&ctx.store, &pkey, &p)?;
                 }
+                // The pacer already halted tritone on a halting error.
                 Err(e) => {
-                    if e.halts() {
-                        halt_everything(&ctx.live, &e);
-                    }
                     tracing::warn!(kind = e.kind(), "backfill stopped");
-                    return Err(e.into());
+                    return Err(e);
                 }
             }
         }

@@ -63,7 +63,8 @@ pub(crate) fn entries(v: Option<&Value>) -> &[Value] {
 }
 
 pub(crate) fn parse_role(v: &Value) -> Option<Role> {
-    Some(Role { id: id_at(v, "id")?, permissions: bits_at(v, "permissions") })
+    let name = v.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+    Some(Role { id: id_at(v, "id")?, name, permissions: bits_at(v, "permissions") })
 }
 
 /// A channel or thread (`parse::parse_channel`), plus what the gateway knows

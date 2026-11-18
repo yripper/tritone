@@ -122,13 +122,14 @@ fn thread_member_events_track_joined() {
 #[test]
 fn guild_create_carries_channels_threads_and_my_roles() {
     let d = json!({
-        "id": "10", "name": "G010", "owner_id": "999", "roles": [{"id": "10", "permissions": "1024"}],
+        "id": "10", "name": "G010", "owner_id": "999", "roles": [{"id": "11", "name": "helpers", "permissions": "1024"}],
         "channels": [{"id": "100", "type": 0}], "threads": [{"id": "110", "type": 11, "parent_id": "100"}],
         "members": [{"user": {"id": "1"}, "roles": ["11"]}, {"user": {"id": "2"}, "roles": ["12"]}]
     });
     match one("GUILD_CREATE", d) {
         GatewayEvent::GuildUpsert(g, chans) => {
             assert_eq!((g.id, g.name.as_str(), g.my_roles.clone()), (Id(10), "G010", vec![Id(11)]));
+            assert_eq!(g.roles[0].name, "helpers");
             assert_eq!(chans.iter().map(|c| c.id).collect::<Vec<_>>(), vec![Id(100), Id(110)]);
             assert!(chans.iter().all(|c| c.guild_id == Some(Id(10))));
         }
@@ -153,11 +154,11 @@ fn guild_update_delete_and_member_update() {
 
 #[test]
 fn guild_role_events() {
-    let role = json!({"guild_id": "10", "role": {"id": "11", "permissions": "1024"}});
+    let role = json!({"guild_id": "10", "role": {"id": "11", "name": "mods", "permissions": "1024"}});
     for name in ["GUILD_ROLE_CREATE", "GUILD_ROLE_UPDATE"] {
         let ev = one(name, role.clone());
         assert!(
-            matches!(ev, GatewayEvent::RoleUpsert { guild: Id(10), role } if role.id == Id(11) && role.permissions == 1024)
+            matches!(ev, GatewayEvent::RoleUpsert { guild: Id(10), role } if role.id == Id(11) && role.permissions == 1024 && role.name == "mods")
         );
     }
     let del = one("GUILD_ROLE_DELETE", json!({"guild_id": "10", "role_id": "11"}));

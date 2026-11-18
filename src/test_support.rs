@@ -21,7 +21,7 @@ pub fn guild(n: u64) -> Guild {
         owner_id: Id(999),
         member_count: Some(10),
         large: false,
-        roles: vec![Role { id: Id(n), permissions: VIEW }],
+        roles: vec![Role { id: Id(n), name: "@everyone".into(), permissions: VIEW }],
         my_roles: vec![],
     }
 }

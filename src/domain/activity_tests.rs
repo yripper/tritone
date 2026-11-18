@@ -8,6 +8,7 @@ use crate::discord::gateway::GatewayEvent;
 use crate::discord::types::{DiscordError, Id, Message, SearchQuery, SearchScope};
 use crate::domain::clock::fake::{FakeTimer, SeqGaps};
 use crate::domain::live::{BufferPolicy, ConnState};
+use crate::domain::paced_search::SearchPacer;
 use crate::domain::send_queue::SendQueue;
 use crate::domain::test_api::{Api, T0};
 use crate::mcp::state::Ctx;
@@ -41,6 +42,11 @@ fn reply(mut m: Message, to: &Message) -> Message {
     m.reply_to_author = Some(to.author.id);
     m.kind = 19;
     m
+}
+
+/// A search pacer with a fixed gap.
+fn pacer(gap: u64) -> SearchPacer {
+    SearchPacer::new(Arc::new(SeqGaps::new(&[gap])))
 }
 
 struct Rig {
@@ -171,7 +177,7 @@ async fn backfill_pages_with_delay_and_resumes() {
     index(&r, msgs);
     // Page 2 fails: the run stops with page 1 saved.
     r.api.fail_on_nth("search", 2, DiscordError::Http("down".into()));
-    let gaps = SeqGaps::new(&[4_000]);
+    let gaps = pacer(4_000);
     assert!(backfill_with(&r.ctx, "backfill", &gaps).await.is_err());
     assert_eq!(searches(&r.api), vec![(SearchScope::Guild(Id(10)), 0), (SearchScope::Guild(Id(10)), 25)]);
     let t = r.api.times_of(is_search);
@@ -198,7 +204,7 @@ async fn backfill_pages_with_delay_and_resumes() {
 async fn backfill_only_searches_my_messages() {
     let r = rig();
     index(&r, vec![gmsg(1, 100, 10, ME, "mine"), gmsg(2, 100, 10, 2, "theirs")]);
-    backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap();
+    backfill_with(&r.ctx, "backfill", &pacer(3_000)).await.unwrap();
     let rows = r.ctx.store.activity_between(0, i64::MAX).unwrap();
     assert_eq!(rows.len(), 1);
     assert!(r.api.calls().iter().all(|c| match c {
@@ -212,7 +218,7 @@ async fn backfill_waits_on_indexing() {
     let r = rig();
     index(&r, vec![gmsg(1, 100, 10, ME, "x")]);
     r.api.fail_on("search", DiscordError::Indexing { retry_after_s: 7 });
-    let rep = backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap();
+    let rep = backfill_with(&r.ctx, "backfill", &pacer(3_000)).await.unwrap();
     let s = searches(&r.api);
     assert_eq!(&s[..2], &[(SearchScope::Guild(Id(10)), 0), (SearchScope::Guild(Id(10)), 0)], "same page again");
     let t = r.api.times_of(is_search);
@@ -225,7 +231,7 @@ async fn backfill_stops_on_captcha() {
     let r = rig();
     index(&r, vec![gmsg(1, 100, 10, ME, "x"), gmsg(2, 200, 20, ME, "y")]);
     r.api.fail_on("search", DiscordError::Captcha);
-    let e = backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap_err();
+    let e = backfill_with(&r.ctx, "backfill", &pacer(3_000)).await.unwrap_err();
     assert!(matches!(e, Error::Discord(DiscordError::Captcha)));
     assert_eq!(searches(&r.api).len(), 1, "nothing else is tried");
     assert_eq!(r.ctx.live.connection(), ConnState::Halted(DiscordError::Captcha));
@@ -237,7 +243,7 @@ async fn backfill_switches_to_max_id_past_the_offset_limit() {
     // 10,005 of my messages; resume near the end of what offsets can reach.
     index(&r, (0..10_005).map(|i| gmsg(i, 100, 10, ME, "x")).collect());
     r.ctx.store.kv_set("backfill:10", r#"{"offset":9950,"max_id":null,"total":10005,"done":false}"#).unwrap();
-    backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap();
+    backfill_with(&r.ctx, "backfill", &pacer(3_000)).await.unwrap();
     let qs: Vec<SearchQuery> = r
         .api
         .calls()
@@ -310,7 +316,7 @@ async fn backfill_stops_when_tritone_is_halted_elsewhere() {
     index(&r, (0..30).map(|i| gmsg(i, 100, 10, ME, "x")).collect());
     // The gateway halts tritone while the backfill is between pages.
     r.ctx.live.halt(DiscordError::Locked);
-    let e = backfill_with(&r.ctx, "backfill", &SeqGaps::new(&[3_000])).await.unwrap_err();
+    let e = backfill_with(&r.ctx, "backfill", &pacer(3_000)).await.unwrap_err();
     assert!(matches!(e, Error::Discord(DiscordError::Locked)));
     assert!(searches(&r.api).is_empty(), "no search while halted");
 }

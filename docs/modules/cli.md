@@ -24,7 +24,7 @@ The `tritone` binary: `start` (the daemon pm2 runs), `login [--token]`, `logout`
   1. binds `127.0.0.1:<port>`, which is the single-instance guard (a second daemon must never open a second gateway session);
   2. ensures the bearer token;
   3. opens the store and builds `AppState` (`LiveState` with `buffer_policy`, `SendQueue`, `SystemTimer`);
-  4. spawns the contribution log recorder (`domain::activity::spawn_recorder`, before the gateway so it sees every event), `discord::gateway::spawn(state)` and `queue.run()`;
+  4. spawns the contribution log recorder (`domain::activity::spawn_recorder`) and the opportunity scanner (`domain::opportunities::spawn_scanner`, `src/cli/daemon.rs:59`), both before the gateway so they see every event, `discord::gateway::spawn(state)` and `queue.run()`;
   5. serves MCP.
 
 ## Dependencies

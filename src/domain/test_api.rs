@@ -26,6 +26,9 @@ pub struct Api {
     fail: StdMutex<Vec<(&'static str, u32, DiscordError)>>,
     /// How many times `clear_halt` was called.
     cleared: AtomicU32,
+    /// Searches in flight now, and the most ever at once.
+    searching: AtomicU32,
+    max_searching: AtomicU32,
 }
 
 impl Api {
@@ -36,11 +39,18 @@ impl Api {
             times: StdMutex::new(Vec::new()),
             fail: StdMutex::new(Vec::new()),
             cleared: AtomicU32::new(0),
+            searching: AtomicU32::new(0),
+            max_searching: AtomicU32::new(0),
         }
     }
 
     pub fn calls(&self) -> Vec<Call> {
         self.inner.calls()
+    }
+
+    /// The most searches that were ever in flight at once.
+    pub fn max_concurrent_searches(&self) -> u32 {
+        self.max_searching.load(Ordering::SeqCst)
     }
 
     pub fn cleared(&self) -> u32 {
@@ -104,7 +114,15 @@ impl DiscordApi for Api {
         fwd!(self, "recent_mentions", self.inner.recent_mentions(l, b))
     }
     async fn search(&self, s: SearchScope, q: &SearchQuery) -> DResult<SearchPage> {
-        fwd!(self, "search", self.inner.search(s, q))
+        let now = self.searching.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_searching.fetch_max(now, Ordering::SeqCst);
+        // Let other tasks run while this search is "on the wire".
+        for _ in 0..3 {
+            tokio::task::yield_now().await;
+        }
+        let r = async { fwd!(self, "search", self.inner.search(s, q)) }.await;
+        self.searching.fetch_sub(1, Ordering::SeqCst);
+        r
     }
     async fn ack(&self, c: Id, m: Id) -> DResult<()> {
         fwd!(self, "ack", self.inner.ack(c, m))

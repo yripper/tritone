@@ -3,10 +3,14 @@
 
 mod activity;
 mod kv;
+mod opportunity;
 mod schema;
+mod voice;
 mod watch;
 
 pub use activity::ActivityRow;
+pub use opportunity::{OpportunityRow, OpportunityStatus};
+pub use voice::{OWN_MESSAGE_KEEP_MS, OwnMessageRow, VoiceEntry};
 pub use watch::{TargetKind, WatchLevel, WatchMap};
 
 use std::path::Path;

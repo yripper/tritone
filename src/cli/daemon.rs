@@ -56,6 +56,7 @@ pub async fn start() -> Result<()> {
     let state = AppState::new(store, secrets, live, queue.clone(), config.clone(), timer);
 
     activity::spawn_recorder(state.live.clone(), state.store.clone(), config.clone());
+    crate::domain::opportunities::spawn_scanner(state.live.clone(), state.store.clone(), config.clone());
     gateway::spawn(state.clone());
     tokio::spawn(queue.run());
     tracing::info!(port = config.port, "tritone listening on 127.0.0.1");

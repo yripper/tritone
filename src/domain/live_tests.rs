@@ -241,7 +241,7 @@ fn mute_until_past_is_inactive() {
 fn can_view_respects_overwrites() {
     let l = live();
     let mut g = guild(1);
-    g.roles.push(Role { id: Id(50), permissions: 0 });
+    g.roles.push(Role { id: Id(50), name: String::new(), permissions: 0 });
     g.my_roles = vec![Id(50)];
     let hidden_from_everyone = vec![Overwrite { id: Id(1), is_member: false, allow: 0, deny: VIEW }];
     let mut c_role = text_channel(101, 1);
@@ -272,7 +272,7 @@ fn owner_and_admin_see_everything() {
     let mut owned = guild(1);
     owned.owner_id = Id(ME);
     let mut admin = guild(2);
-    admin.roles.push(Role { id: Id(60), permissions: 1 << 3 });
+    admin.roles.push(Role { id: Id(60), name: String::new(), permissions: 1 << 3 });
     admin.my_roles = vec![Id(60)];
     let mut a = text_channel(101, 1);
     a.overwrites = vec![Overwrite { id: Id(1), is_member: false, allow: 0, deny: VIEW }];
@@ -398,7 +398,7 @@ fn guild_update_keeps_channels_and_my_roles() {
 fn my_roles_update_changes_visibility() {
     let l = ready_live();
     let mut g = guild(1);
-    g.roles.push(Role { id: Id(900), permissions: 0 });
+    g.roles.push(Role { id: Id(900), name: String::new(), permissions: 0 });
     l.apply(GatewayEvent::GuildUpdate(Box::new(g)), NOW);
     let mut c = text_channel(101, 1);
     c.overwrites = vec![
@@ -495,10 +495,16 @@ fn role_events_change_visibility() {
     l.apply(GatewayEvent::ChannelUpsert(c), NOW);
     assert!(!l.can_view(Id(101)));
     // A new role of mine with ADMINISTRATOR sees everything.
-    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 1 << 3 } }, NOW);
+    l.apply(
+        GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), name: String::new(), permissions: 1 << 3 } },
+        NOW,
+    );
     assert!(l.can_view(Id(101)));
     // Updating it replaces it rather than adding a second copy.
-    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 0 } }, NOW);
+    l.apply(
+        GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), name: String::new(), permissions: 0 } },
+        NOW,
+    );
     assert!(!l.can_view(Id(101)));
     assert_eq!(l.guild(Id(1)).unwrap().roles.iter().filter(|r| r.id == Id(900)).count(), 1);
 
@@ -508,4 +514,21 @@ fn role_events_change_visibility() {
     assert!(g.my_roles.is_empty(), "a deleted role leaves my roles too");
     // Unknown guilds are ignored.
     l.apply(GatewayEvent::RoleDelete { guild: Id(99), role: Id(1) }, NOW);
+}
+
+#[test]
+fn new_threads_under_buffered_parents_are_buffered() {
+    let l = ready_live();
+    l.set_buffered(HashSet::from([Id(101)]));
+    let thread = |id: u64, parent: u64| Channel {
+        kind: crate::discord::types::ChannelKind::PublicThread,
+        parent_id: Some(Id(parent)),
+        ..text_channel(id, 1)
+    };
+    l.apply(GatewayEvent::ChannelUpsert(thread(160, 101)), NOW);
+    l.apply(GatewayEvent::ChannelUpsert(thread(170, 102)), NOW);
+    create(&l, msg(id_at(NOW - 1_000), 160, 2, "in a new thread"));
+    create(&l, msg(id_at(NOW - 900), 170, 2, "elsewhere"));
+    assert_eq!(l.recent(Id(160)).len(), 1, "its parent is buffered");
+    assert!(l.recent(Id(170)).is_empty());
 }

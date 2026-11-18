@@ -156,16 +156,17 @@ fn token_label(inner: &str, live: &LiveState, guild: Option<Id>) -> Option<Strin
     (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_')).then(|| format!(":{name}:"))
 }
 
-/// Roles carry no name in tritone's model: the guild's own id is @everyone,
-/// any other role of the guild shows its id.
+/// `@everyone` for the server's own id, `@name` for a role the model knows
+/// by name, else `@role:<id>` (an unnamed, new or deleted role, or an
+/// unknown server).
 fn role_label(id: Id, live: &LiveState, guild: Option<Id>) -> String {
-    let Some(g) = guild.and_then(|g| live.guild(g)) else { return "@unknown-role".into() };
-    if id == g.id {
-        "@everyone".into()
-    } else if g.roles.iter().any(|r| r.id == id) {
-        format!("@role:{id}")
-    } else {
-        "@unknown-role".into()
+    let g = guild.and_then(|g| live.guild(g));
+    if g.as_ref().is_some_and(|g| g.id == id) {
+        return "@everyone".into();
+    }
+    match g.and_then(|g| g.roles.into_iter().find(|r| r.id == id)).filter(|r| !r.name.is_empty()) {
+        Some(r) => format!("@{}", r.name),
+        None => format!("@role:{id}"),
     }
 }
 

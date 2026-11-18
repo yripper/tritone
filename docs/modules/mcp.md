@@ -21,7 +21,7 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
   - `get_pending` (`src/mcp/tools/read.rs:130`) → `{pending: [{channel, label, reason, unread_count_hint, mention_count, messages, more_unread, pings?, error?}], truncated}` (`truncated`: the mentions inbox wasn't read whole for its 7 days: more than 5 pages, or a page failed). Never acks.
   - `read_history{channel, limit=50, before?, peek=false}` (`src/mcp/tools/read.rs:137`): marks read unless `peek` or `before`.
   - `read_thread{thread, limit=50, peek=false}` (`src/mcp/tools/read.rs:148`).
-  - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages).
+  - `search_messages{query, server?, channel?, author?, offset?}` (`src/mcp/tools/read.rs:160`): a server channel is searched through its server with `channel_id`; a DM through the channel endpoint; neither is an error. `author` goes through `resolve_user`. Offset capped at 9,975 (https://docs.discord.food/resources/message#search-guild-messages). Paced through `SearchPacer::global()`, shared with backfill, voice and cleanup.
   - `get_channel_info{channel}` (`src/mcp/tools/read.rs:194`), `find_user{query}` (`src/mcp/tools/read.rs:206`) → `{users}`.
 - **Triage** (`src/mcp/tools/triage.rs`):
   - `mark_read{channels[]}` (`src/mcp/tools/triage.rs:85`): every name must resolve first, or nothing is acked; → `{marked, already_read, not_found}`.
@@ -34,7 +34,11 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 - Activity tools (`src/mcp/tools/activity.rs`):
   - `my_activity{days?}` (`src/mcp/tools/activity.rs:50`): the last `days` (default 30, at least 1) through `domain::activity::my_activity`. Reads only the store and `LiveState`, so it works while halted.
   - `backfill_activity` (`src/mcp/tools/activity.rs:62`): refuses until the connection is `Ready` (before READY no guilds are known). Unless every guild is done, starts `domain::activity::backfill` in a background task, at most one at a time (`BACKFILL_RUNNING`, `src/mcp/tools/activity.rs:22`); returns `{ running, guilds_done, guilds_total, recorded, messages_seen, last_error?, note }`. A run that stops stores its error in `kv` `backfill_last_error`; the next call continues it.
-- The engage group is empty so far.
+- Engage tools (`src/mcp/tools/engage.rs`):
+  - Opportunities: `get_opportunities{limit?}` (`src/mcp/tools/engage.rs:122`, default 15, 1–50) through `run`; `dismiss_opportunity{id}` (`:135`) touches only the store.
+  - Voice: `get_voice{channel}` (`src/mcp/tools/engage.rs:144`), through `run`, calls `domain::voice::get_voice` with `SearchPacer::global()`. `save_profile{category, body}` (`:156`), `save_chat_notes{channel, body}` (`:164`), `set_category{target, category}` (`:174`) and `list_stale_profiles` (`:181`) touch only the store and `LiveState`, so they work while halted (`local`, `src/mcp/tools/engage.rs:92`).
+  - `channel` goes through `resolve_channel` (ids, links, `#name`, `server/#name`, `@user`, part of a name; `<#id>` is unwrapped first) and must be a channel `LiveState` knows (`channel_arg`, `src/mcp/tools/engage.rs:104`); `target` falls back to `resolve_server` when no channel matches (`target_arg`, `:110`).
+  - Cleanup: `cleanup_plan` (`src/mcp/tools/engage.rs:190`) and `cleanup_apply{items[]}` (`:197`) run `domain::cleanup` through `run`. The descriptions and the instructions say each item needs the user's own explicit OK. A `read:` result's `unseen` channels are to be shown to the user.
 
 ## Other routes
 - `POST /login-notify` (`src/mcp/http.rs:68`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: only while halted on `NeedsLogin` (any other halt, or a live connection → 409 asking for a restart, so a login can't lift a CAPTCHA or block halt or wake a healthy gateway); then `AppState::accept_login` with the keyring token, 200 when it acts; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.

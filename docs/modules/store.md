@@ -10,6 +10,7 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 - `src/store/schema.rs`: append-only `MIGRATIONS`, tracked with `PRAGMA user_version`.
 - `src/store/kv.rs`: `kv_get`, `kv_set`.
 - `src/store/watch.rs`: `WatchLevel`, `TargetKind`, watch levels and snoozes.
+- `src/store/activity.rs`: the contribution log (`ActivityRow`). Tests: `src/store/activity_tests.rs`.
 - `src/store/store_tests.rs`: tests.
 
 ## Schema (`src/store/schema.rs:6`)
@@ -18,12 +19,14 @@ SQLite at `~/.tritone/tritone.db` (0600, WAL). Holds triage state (watch levels,
 
 ## Public surface
 - `Store::open` (`src/store/mod.rs:21`), `Store::open_in_memory` (`src/store/mod.rs:30`).
-- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`.
+- `kv_get` / `kv_set` (`src/store/kv.rs:7`, `:11`). Known keys: `build_number`, `installation_id`, `backfill:<guild>` (backfill progress JSON), `backfill_last_error` (why the last backfill run stopped; empty when cleared).
 - `WatchLevel { Full, Normal, Muted }` (`src/store/watch.rs:12`), serde snake_case and `JsonSchema`, so tools can take it as an argument.
 - `TargetKind { Guild, Channel }` (`src/store/watch.rs:43`), part of the watch key.
 - `WatchMap { guilds, channels }` (`src/store/watch.rs:59`): every explicit level, split by kind.
 - `get_watch(target, kind)`, `set_watch(target, kind, level)` (`None` clears that kind only), `all_watch() -> WatchMap` (`src/store/watch.rs:69`, `:82`, `:98`).
 - `set_snooze` (Unix ms; `None` unsnoozes), `snoozed_until` (returns the stored time even if past) (`src/store/watch.rs:116`, `:130`).
+- `ActivityRow { message_id, guild_id, channel_id, created_at, kind, is_reply, via_tritone }` (`src/store/activity.rs:11`).
+- `record_activity(&row) -> bool` (`src/store/activity.rs:43`): insert-or-ignore, true when inserted. `mark_sent_via_tritone(id) -> bool` (`src/store/activity.rs:63`): false when there's no row yet. `set_activity_kind(id, kind)` (`src/store/activity.rs:72`). `activity_between(from_ms, to_ms)` (`src/store/activity.rs:79`): `from <= created_at < to`, newest first.
 
 ## Dependencies
 rusqlite (bundled), serde, schemars. `Id` comes from `src/discord/types.rs`.

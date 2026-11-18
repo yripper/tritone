@@ -38,8 +38,15 @@ fn named(id: u64, guild: u64, name: &str) -> Channel {
 fn state() -> (AppState, Arc<FakeDiscord>) {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let timer = Arc::new(FakeTimer::at(NOW));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(SeqGaps::new(&[0]))));
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 }));
+    let config = Arc::new(Config::default());
+    let queue = Arc::new(SendQueue::new(
+        store.clone(),
+        live.clone(),
+        config.clone(),
+        timer.clone(),
+        Arc::new(SeqGaps::new(&[0])),
+    ));
     let mut d = dm(301, 2);
     d.last_message_id = Some(at(1_000));
     let mut help = named(102, 1, "help");
@@ -49,7 +56,7 @@ fn state() -> (AppState, Arc<FakeDiscord>) {
     snap.read_states.insert(Id(301), read_state(Some(at(5_000)), 1));
     snap.read_states.insert(Id(102), read_state(Some(at(5_000)), 0));
     live.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
-    let state = AppState::new(store, Arc::new(MemSecrets::default()), live, queue, Arc::new(Config::default()), timer);
+    let state = AppState::new(store, Arc::new(MemSecrets::default()), live, queue, config, timer);
     let fake = Arc::new(FakeDiscord::new(user(ME)));
     state.set_api(Some(fake.clone()));
     (state, fake)

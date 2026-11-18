@@ -28,4 +28,9 @@ pub trait DiscordApi: Send + Sync {
     async fn leave_guild(&self, guild: Id) -> DResult<()>;
     async fn set_mute(&self, target: MuteTarget, muted: bool) -> DResult<()>;
     async fn user(&self, user: Id) -> DResult<UserRef>;
+
+    /// Lifts a halt the client keeps itself (e.g. a sticky CAPTCHA), so calls
+    /// reach Discord again. Called only by `SendQueue::resume`, on the user's
+    /// explicit OK, together with `LiveState::clear_halt`. No-op by default.
+    fn clear_halt(&self) {}
 }

@@ -25,11 +25,18 @@ pub struct World {
 pub fn world(snap: ReadySnapshot) -> World {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let timer = Arc::new(FakeTimer::at(NOW));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(SeqGaps::new(&[0]))));
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 }));
     live.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
+    let config = Arc::new(Config::default());
+    let queue = Arc::new(SendQueue::new(
+        store.clone(),
+        live.clone(),
+        config.clone(),
+        timer.clone(),
+        Arc::new(SeqGaps::new(&[0])),
+    ));
     let fake = Arc::new(FakeDiscord::new(user(ME)));
-    let ctx = Ctx { store, live, api: fake.clone(), queue, config: Arc::new(Config::default()), timer };
+    let ctx = Ctx { store, live, api: fake.clone(), queue, config, timer };
     World { ctx, fake }
 }
 

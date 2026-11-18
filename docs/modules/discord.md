@@ -6,7 +6,7 @@ Last verified: 2026-11-19
 Everything that talks to Discord. Nothing outside `src/discord/` makes network calls; the rest of tritone uses the `DiscordApi` trait and `LiveState`.
 
 ## Structure
-- `src/discord/types.rs`: the slim model (`Id`, `ChannelKind`, `UserRef`, `Role`, `Overwrite`, `Guild`, `Channel`, `ReadState`, `MuteUntil`, `GuildSettings`, `Message`, `ReadySnapshot`), `DiscordError`, and the REST argument types (`OutgoingMessage`, `SearchScope`, `SearchQuery`, `SearchPage`, `MuteTarget`).
+- `src/discord/types.rs`: the slim model (`Id`, `ChannelKind`, `UserRef`, `Role` (id, name, permissions), `Overwrite`, `Guild`, `Channel`, `ReadState`, `MuteUntil`, `GuildSettings`, `Message`, `ReadySnapshot`), `DiscordError`, and the REST argument types (`OutgoingMessage`, `SearchScope`, `SearchQuery`, `SearchPage`, `MuteTarget`).
 - `src/discord/api.rs`: `DResult` and the `DiscordApi` trait.
 - `src/discord/fake.rs` (tests only): `FakeDiscord` and `Call`.
 - `src/discord/gateway/`: the live connection and `GatewayEvent`; see [gateway.md](gateway.md).

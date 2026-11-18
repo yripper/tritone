@@ -13,7 +13,7 @@ fn ready_json(read_state: Value) -> Value {
         "guilds": [
             {
                 "id": "10", "name": "G010", "owner_id": "999", "member_count": 40, "large": false,
-                "roles": [{"id": "10", "permissions": "1024"}, {"id": "11", "permissions": "8"}],
+                "roles": [{"id": "10", "name": "@everyone", "permissions": "1024"}, {"id": "11", "name": "mods", "permissions": "8"}],
                 "channels": [
                     {"id": "100", "type": 0, "name": "C100", "position": 2, "parent_id": "105",
                      "last_message_id": "5000",
@@ -94,6 +94,7 @@ fn parse_ready_core_fields() {
     assert_eq!((g10.name.as_str(), g10.owner_id, g10.member_count), ("G010", Id(999), Some(40)));
     assert_eq!(g10.roles.len(), 2);
     assert_eq!(g10.roles[1].permissions, 8);
+    assert_eq!(g10.roles[1].name, "mods", "role names come from READY");
     assert_eq!(g10.my_roles, vec![Id(11)], "my_roles come from merged_members, index-aligned");
     let g20 = snap.guilds.iter().find(|g| g.id == Id(20)).unwrap();
     assert_eq!((g20.name.as_str(), g20.owner_id, g20.large), ("G020", Id(1), true), "nested properties work too");

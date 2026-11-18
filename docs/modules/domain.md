@@ -42,7 +42,7 @@ The logic between the MCP tools and Discord: errors, time, the live model, rende
   - `note_acked(channel, message)` (`src/domain/live.rs:210`): tritone acked over REST.
 - `render_message(m, live) -> RenderedMessage` (`src/domain/render.rs:41`): `{ id, from (display name else username), from_id, at (RFC 3339 UTC), text, reply_to: Option<ReplyRef { message_id, author }>, reactions, link }`. In `text`, outside code (`map_outside_code`, `src/domain/render.rs:82`):
   - `<@id>`/`<@!id>` → `@label` or `@unknown-user`; `<#id>` → `#name` or `#unknown-channel`; custom emoji `<:name:id>`/`<a:name:id>` → `:name:` (`token_label`, `src/domain/render.rs:140`);
-  - `<@&id>` → `@everyone` for the guild's own id, `@role:<id>` for another role of the guild, else `@unknown-role` (`role_label`, `src/domain/render.rs:161`): roles carry no name in the model;
+  - `<@&id>` → `@everyone` for the guild's own id, `@name` for a role the model knows with a name, else `@role:<id>` (`role_label`, `src/domain/render.rs:162`);
   - attachments (`[image: …]`, `[file: …]`) and embeds (`[embed: title]`) are appended one per line;
   - a reply whose author Discord didn't send (deleted message) has `author: "unknown-user"`.
   Syntax reference: https://docs.discord.food/reference#message-formatting

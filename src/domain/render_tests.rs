@@ -11,12 +11,13 @@ fn named(n: u64, display: &str) -> UserRef {
     UserRef { display_name: Some(display.into()), ..user(n) }
 }
 
-/// G001 (with role 5) holding C101, a DM D201 with U002, and known users
+/// G001 (with role 5 "mods" and a nameless role 6) holding C101, a DM D201 with U002, and known users
 /// U003 ("Three"), U004 and U005 (both "Sam").
 fn world() -> LiveState {
     let l = LiveState::new(BufferPolicy { per_channel: 50, max_age_ms: 86_400_000 });
     let mut g = guild(1);
-    g.roles.push(Role { id: Id(5), permissions: 0 });
+    g.roles.push(Role { id: Id(5), name: "mods".into(), permissions: 0 });
+    g.roles.push(Role { id: Id(6), name: String::new(), permissions: 0 });
     let mut snap = ready(ME, vec![g], vec![text_channel(101, 1), dm(201, 2)]);
     snap.users = vec![named(3, "Three"), named(4, "Sam"), named(5, "Sam")];
     l.apply(GatewayEvent::Ready(Box::new(snap)), NOW);
@@ -30,7 +31,7 @@ fn in_guild(id: Id, content: &str) -> Message {
 #[test]
 fn render_handles_unknown_mentions_and_custom_emoji() {
     let l = world();
-    let content = "hi <@2> <@!3> <@999> in <#101> and <#998>, <@&1> <@&5> <@&777> <:party:12345> <a:wave:678> \
+    let content = "hi <@2> <@!3> <@999> in <#101> and <#998>, <@&1> <@&5> <@&6> <@&777> <:party:12345> <a:wave:678> \
                    bad <@abc> <# <:x:> <@&> tail <";
     let mut m = in_guild(id_at(NOW), content);
     m.reply_to = Some(Id(50));
@@ -40,7 +41,7 @@ fn render_handles_unknown_mentions_and_custom_emoji() {
     let r = render_message(&m, &l);
     assert_eq!(
         r.text,
-        "hi @U002 @Three @unknown-user in #C101 and #unknown-channel, @everyone @role:5 @unknown-role :party: :wave: \
+        "hi @U002 @Three @unknown-user in #C101 and #unknown-channel, @everyone @mods @role:6 @role:777 :party: :wave: \
          bad <@abc> <# <:x:> <@&> tail <\n[image: a.png]\n[file: b.pdf]\n[embed: Title]"
     );
     // The referenced message was deleted: no author known.

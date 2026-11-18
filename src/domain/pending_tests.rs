@@ -10,7 +10,7 @@ use crate::test_support::*;
 /// G002 with C111; a DM D301 with U002 and a group DM D302 "trip".
 fn snap() -> ReadySnapshot {
     let mut g1 = guild(1);
-    g1.roles.push(Role { id: Id(9), permissions: 0 });
+    g1.roles.push(Role { id: Id(9), name: String::new(), permissions: 0 });
     g1.my_roles = vec![Id(9)];
     let thread = Channel {
         kind: ChannelKind::PublicThread,

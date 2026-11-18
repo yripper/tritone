@@ -138,6 +138,8 @@ impl UserRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Role {
     pub id: Id,
+    /// Empty when Discord didn't send one.
+    pub name: String,
     pub permissions: u64,
 }
 

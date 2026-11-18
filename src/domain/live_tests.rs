@@ -432,3 +432,27 @@ fn guild_and_channel_lifecycle() {
     l.apply(GatewayEvent::ChannelUpsert(text_channel(101, 1)), NOW);
     assert_eq!(l.channel(Id(101)).unwrap().last_message_id, Some(id));
 }
+
+#[test]
+fn role_events_change_visibility() {
+    let l = ready_live();
+    l.apply(GatewayEvent::MyRolesUpdate { guild: Id(1), roles: vec![Id(900)] }, NOW);
+    let mut c = text_channel(101, 1);
+    c.overwrites = vec![Overwrite { id: Id(1), is_member: false, allow: 0, deny: VIEW }];
+    l.apply(GatewayEvent::ChannelUpsert(c), NOW);
+    assert!(!l.can_view(Id(101)));
+    // A new role of mine with ADMINISTRATOR sees everything.
+    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 1 << 3 } }, NOW);
+    assert!(l.can_view(Id(101)));
+    // Updating it replaces it rather than adding a second copy.
+    l.apply(GatewayEvent::RoleUpsert { guild: Id(1), role: Role { id: Id(900), permissions: 0 } }, NOW);
+    assert!(!l.can_view(Id(101)));
+    assert_eq!(l.guild(Id(1)).unwrap().roles.iter().filter(|r| r.id == Id(900)).count(), 1);
+
+    l.apply(GatewayEvent::RoleDelete { guild: Id(1), role: Id(900) }, NOW);
+    let g = l.guild(Id(1)).unwrap();
+    assert!(g.roles.iter().all(|r| r.id != Id(900)));
+    assert!(g.my_roles.is_empty(), "a deleted role leaves my roles too");
+    // Unknown guilds are ignored.
+    l.apply(GatewayEvent::RoleDelete { guild: Id(99), role: Id(1) }, NOW);
+}

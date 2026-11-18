@@ -98,3 +98,43 @@ async fn cleanup_tools_plan_then_apply_only_the_given_items() {
     assert_eq!(v["results"][0]["status"], "done", "{v}");
     assert!(!api.calls().iter().any(|c| matches!(c, crate::discord::fake::Call::LeaveGuild(_))));
 }
+
+#[tokio::test]
+async fn opportunity_tools_list_and_dismiss() {
+    use crate::store::{OpportunityRow, OpportunityStatus, TargetKind, WatchLevel};
+    let (s, api) = server();
+    s.state.store.set_watch(Id(100), TargetKind::Channel, Some(WatchLevel::Full)).unwrap();
+    let mut m = msg(id_at(T0 - 3_600_000), 100, 2, "anyone know why this fails?");
+    m.guild_id = Some(Id(10));
+    api.put_history(Id(100), vec![m.clone()]);
+    let row = OpportunityRow {
+        message_id: m.id,
+        channel_id: Id(100),
+        guild_id: Id(10),
+        rule: "question".into(),
+        created_at: m.timestamp_ms,
+        status: OpportunityStatus::Open,
+        updated_at: m.timestamp_ms,
+    };
+    s.state.store.add_opportunity(&row).unwrap();
+
+    let v = out(&s.get_opportunities(Parameters(OpportunitiesArgs { limit: None })).await.unwrap());
+    let o = &v["opportunities"][0];
+    assert_eq!((o["rule"].clone(), o["kind"].clone()), ("question".into(), "answer".into()), "{v}");
+    assert_eq!(o["message"]["text"], "anyone know why this fails?");
+
+    assert_eq!(out(&s.dismiss_opportunity(Parameters(DismissArgs { id: m.id })).await.unwrap())["ok"], true);
+    let v = out(&s.get_opportunities(Parameters(OpportunitiesArgs { limit: None })).await.unwrap());
+    assert_eq!(v["opportunities"], serde_json::json!([]));
+    assert_eq!(s.dismiss_opportunity(Parameters(DismissArgs { id: Id(7) })).await.unwrap().is_error, Some(true));
+}
+
+#[tokio::test]
+async fn voice_takes_channel_names() {
+    let (s, _) = server();
+    let v = out(&s.get_voice(ch("#C100")).await.unwrap());
+    assert_eq!(v["category"], "general", "{v}");
+    let set = Parameters(CategoryArgs { target: "G010".into(), category: "work".into() });
+    assert_eq!(out(&s.set_category(set).await.unwrap())["ok"], true, "a server by name");
+    assert_eq!(s.state.store.category(Id(10)).unwrap().as_deref(), Some("work"));
+}

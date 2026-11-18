@@ -39,8 +39,8 @@ Triage
 - If the user keeps asking about a channel, suggest moving it to full. Never change watch levels in bulk without asking.
 
 Opportunities
-- get_opportunities lists places in full-watch channels where the user could contribute: unanswered questions, messages matching the user's configured topics, and active threads they took part in. Each comes with its context, its age, whether anyone answered since, and the rule that matched.
-- You judge which are worth answering. Check the facts before drafting, and propose the draft to the user like any other send. dismiss_opportunity hides one for good.
+- get_opportunities lists places in full-watch server channels where the user could contribute: unanswered questions, messages matching the user's configured topics, and new messages in threads they wrote in or replies to them. Each comes with the messages before it, its age and the rule that matched. Ones someone else already answered are left out. It doesn't mark anything read.
+- You judge which are worth answering. Check the facts before drafting, and propose the draft to the user like any other send: reply_to the opportunity's id, and pass its kind to send_message. Once sent, it's marked answered. dismiss_opportunity hides one for good.
 
 Voice
 - Before drafting for a channel, call get_voice. It returns the channel's category, the saved profile and notes, and, when needs_learning or notes_stale is true, the user's own recent messages (fetched live through search, so it takes a few seconds per page). Study those messages, then save_profile (tone per category) and save_chat_notes (per channel). Describe the style; never copy private facts verbatim. Then draft.

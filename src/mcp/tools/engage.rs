@@ -1,4 +1,4 @@
-//! Engagement tools: voice and cleanup.
+//! Engagement tools: opportunities, voice and cleanup.
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, ContentBlock};
@@ -9,12 +9,13 @@ use crate::discord::types::Id;
 use crate::domain::errors::{Error, Result as DResult};
 use crate::domain::live::LiveState;
 use crate::domain::paced_search::SearchPacer;
-use crate::domain::{cleanup, voice};
+use crate::domain::resolve::{resolve_channel, resolve_server};
+use crate::domain::{cleanup, opportunities, voice};
 use crate::mcp::server::{TritoneServer, json};
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct ChannelArgs {
-    /// The channel, thread or DM: its id or a discord.com/channels/... link.
+    /// The channel, thread or DM: an id, a discord.com/channels/... link, #name, server/#name, @user or part of a name.
     pub channel: String,
 }
 
@@ -28,7 +29,7 @@ pub struct ProfileArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct NotesArgs {
-    /// The channel, thread or DM: its id or a discord.com/channels/... link.
+    /// The channel, thread or DM: an id, a discord.com/channels/... link, #name, server/#name, @user or part of a name.
     pub channel: String,
     /// How the user writes there (up to 2,000 characters).
     pub body: String,
@@ -36,7 +37,7 @@ pub struct NotesArgs {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct CategoryArgs {
-    /// A channel, thread or DM (id or discord.com/channels/... link), or a server id.
+    /// A channel, thread or DM (as for get_voice), or a server by id or name.
     pub target: String,
     /// A slug like dev-community, work, friends or general.
     pub category: String,
@@ -46,6 +47,23 @@ pub struct CategoryArgs {
 pub struct ApplyArgs {
     /// Item ids from cleanup_plan, each one approved by the user: leave:<server>, mute:<server>, mute:<server>/<channel> or read:<server>.
     pub items: Vec<String>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct OpportunitiesArgs {
+    /// How many to return, newest first. Default 15, at most 50.
+    pub limit: Option<usize>,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct DismissArgs {
+    /// The opportunity's id (its message id) from get_opportunities.
+    pub id: Id,
+}
+
+#[derive(Serialize)]
+struct Found {
+    opportunities: Vec<opportunities::Opportunity>,
 }
 
 #[derive(Serialize)]
@@ -63,18 +81,10 @@ struct Categories {
     categories: Vec<String>,
 }
 
-/// The id in an id, `<#id>` or a `discord.com/channels/g/c[/m]` link (the
-/// channel part; a server-only link gives the server).
-fn id_in(query: &str) -> DResult<Id> {
+/// `<#id>` as Discord writes a channel mention, else the query itself.
+fn unwrap_mention(query: &str) -> &str {
     let q = query.trim();
-    let raw = match q.find("discord.com/channels/") {
-        Some(at) => {
-            let parts: Vec<&str> = q[at..].split('/').collect();
-            parts.get(3).filter(|p| !p.is_empty()).or(parts.get(2)).copied().unwrap_or_default()
-        }
-        None => q.trim_start_matches(['#', '<', '>']).trim_end_matches('>'),
-    };
-    raw.parse().map_err(|_| Error::Invalid(format!("\"{query}\" is not an id or a discord.com/channels/... link")))
+    q.strip_prefix("<#").and_then(|r| r.strip_suffix('>')).unwrap_or(q)
 }
 
 /// A tool result for work that needs no Discord connection (the store and
@@ -89,24 +99,45 @@ fn local<T: Serialize>(outcome: DResult<T>) -> CallToolResult {
     }
 }
 
-/// A channel the live model knows.
-// TODO(resolve): switch to the shared channel resolver (names, #channel, @user) once it lands.
+/// A channel the live model knows, by id, link, `#name`, `server/#name`,
+/// `@user` or part of a name.
 fn channel_arg(query: &str, live: &LiveState) -> DResult<Id> {
-    let id = id_in(query)?;
+    let id = resolve_channel(unwrap_mention(query), live)?;
     live.channel(id).map(|_| id).ok_or_else(|| Error::NotFound(query.to_string()))
 }
 
-/// A channel or a server the live model knows.
+/// A channel (as `channel_arg`), else a server by id or name.
 fn target_arg(query: &str, live: &LiveState) -> DResult<Id> {
-    let id = id_in(query)?;
-    if live.channel(id).is_some() || live.guild(id).is_some() {
-        return Ok(id);
+    match channel_arg(query, live) {
+        Err(Error::NotFound(_)) => resolve_server(query, live),
+        other => other,
     }
-    Err(Error::NotFound(query.to_string()))
 }
 
 #[tool_router(router = engage_router, vis = "pub(crate)")]
 impl TritoneServer {
+    #[tool(
+        description = "Places in full-watch server channels where the user could contribute, newest first: unanswered questions (shown once 30 min old, until 48 h), messages matching the user's configured topics, and new messages in threads the user wrote in or replies to them. Each has the message, up to 5 messages before it, the channel, its age in minutes, the rule, a link, and kind (pass it to send_message when answering). Ones someone else already answered are dropped. Doesn't mark anything read."
+    )]
+    async fn get_opportunities(
+        &self,
+        Parameters(a): Parameters<OpportunitiesArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let limit = a.limit.unwrap_or(15).clamp(1, 50);
+        Ok(self
+            .run(|ctx| async move {
+                opportunities::get_opportunities(&ctx, limit).await.map(|opportunities| Found { opportunities })
+            })
+            .await)
+    }
+
+    #[tool(description = "Hide one opportunity for good (it never comes back, even after a restart).")]
+    async fn dismiss_opportunity(&self, Parameters(a): Parameters<DismissArgs>) -> Result<CallToolResult, McpError> {
+        let now = self.state.timer.now_ms();
+        let done = opportunities::dismiss_opportunity(&self.state.store, a.id, now);
+        Ok(local(done.map(|_| Saved { ok: true })))
+    }
+
     #[tool(
         description = "Call before drafting for a channel. Returns its category (its own, else its parent channel's or server's, else general), the saved tone profile and channel notes, and profile_stale, notes_stale (also true with no notes) and needs_learning. When learning is needed it also returns the user's own recent messages there (my_messages_in_channel, up to 60) and, when needs_learning, from up to 3 other channels or servers of the category (my_messages_in_category, up to 40), fetched live through Discord search, slowly (a few seconds per page). Messages sent through tritone are left out."
     )]

@@ -851,6 +851,12 @@ impl SendQueue {
             // Only the contribution log depends on this; the message is out.
             tracing::warn!("recording a sent message failed: {e}");
         }
+        // A reply answers the opportunity it replies to, if there is one.
+        if let Some(JobSpec::Send { reply_to: Some(r), .. }) = &job.spec
+            && let Err(e) = self.store.opportunity_answered(*r, now)
+        {
+            tracing::warn!("marking an opportunity answered failed: {e}");
+        }
         // From here on the message is out: a failure must not look like a
         // failed send, or it gets approved and sent again.
         if matches!(job.spec, Some(JobSpec::Send { .. })) {

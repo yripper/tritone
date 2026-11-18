@@ -3,6 +3,7 @@ pub mod cleanup;
 pub mod clock;
 pub mod errors;
 pub mod live;
+pub mod opportunities;
 pub mod paced_search;
 pub mod pending;
 pub mod reading;

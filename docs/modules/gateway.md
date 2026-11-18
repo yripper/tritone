@@ -23,33 +23,34 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 
 ## Key methods
 
-- `Gateway::run` (`src/discord/gateway/conn.rs:228`): token → `Opener::open` → `set_api` → `session_loop`. On a halt it waits for a login; on a new token it opens a new session at once.
-- `wait_for_token` (`src/discord/gateway/conn.rs:257`): with no keyring token it calls `live.halt(NeedsLogin)` and waits on `login_notify`.
-- `wait_for_login` (`src/discord/gateway/conn.rs:272`): ignores a wake-up while the live state is still halted, so a stale notify can't drive an identify loop.
-- `session_loop` (`src/discord/gateway/conn.rs:283`): reconnects with one token.
-  - Backoff is `min(30 s, 1 s << n)` plus 0–1 s of jitter, reset after a connection that stayed ready for 60 s (`Timing::default`, `src/discord/gateway/conn.rs:67`).
+- `Gateway::run` (`src/discord/gateway/conn.rs:237`): token → `Opener::open` → `set_api` → `session_loop`. On a halt it waits for a login; on a new token it opens a new session at once.
+- `wait_for_token` (`src/discord/gateway/conn.rs:266`): with no keyring token it calls `live.halt(NeedsLogin)` and waits on `login_notify`.
+- `wait_for_login` (`src/discord/gateway/conn.rs:281`): ignores a wake-up while the live state is still halted, so a stale notify can't drive an identify loop.
+- `session_loop` (`src/discord/gateway/conn.rs:292`): reconnects with one token.
+  - Backoff is `min(30 s, 1 s << n)` plus 0–1 s of jitter, reset after a connection that stayed ready for 60 s (`Timing::default`, `src/discord/gateway/conn.rs:69`).
   - After 3 resumes that never reach RESUMED, it identifies fresh.
+  - After 3 identifies in a row that end without READY (op 9 `false`, close 4007/4009, or a dropped socket), it halts with `DiscordError::SessionRefused` ("Discord keeps refusing the session: restart tritone"). Each identify is a new session attempt, and retrying inside a rate limit keeps the account inside it (`MAX_UNREADY_IDENTIFIES`). Connect failures and resumes don't count; READY resets the count.
   - While waiting it still listens for a new login.
-- `connect_once` (`src/discord/gateway/conn.rs:357`):
+- `connect_once` (`src/discord/gateway/conn.rs:386`):
   - `ws_connect` to `<base>/?v=9&encoding=json&compress=zlib-stream`, with `fp.ws_headers()`. The connect timeout is 15 s and HELLO's is 10 s.
   - Then op 2, or op 6 `{token, session_id, seq}` to the resume URL.
-- `on_close` (`src/discord/gateway/conn.rs:405`):
+- `on_close` (`src/discord/gateway/conn.rs:442`):
   - 4004 → `live.reject_token(token)` and halt;
   - 4001–4003, 4005, 4008 and 4010–4016 → `live.halt(GatewayClosed { code })` and halt. `status` then says "Discord closed the session (code N): restart tritone (pm2 restart tritone)";
   - 4007 or 4009 → identify after 1–5 s;
   - anything else, or no close frame → resume.
   
   Source: https://docs.discord.food/gateway/opcodes-and-close-codes#gateway-close-event-codes
-- `Live::pump` (`src/discord/gateway/conn.rs:507`): one socket's loop.
+- `Live::pump` (`src/discord/gateway/conn.rs:545`): one socket's loop.
   - The first heartbeat goes at a random point of the interval. A beat still unacked at the next one means a zombie: close 4000 and resume.
   - A server op 1 is answered at once.
   - A login notify with a different keyring token closes 4000 and identifies fresh with it (reviewer condition C2).
-- `on_payload` (`src/discord/gateway/conn.rs:549`): op 7 → resume; op 9 `true` → resume, `false` → identify after 1–5 s. https://docs.discord.food/gateway/using-gateway#resuming
-- `on_ready` (`src/discord/gateway/conn.rs:613`):
+- `on_payload` (`src/discord/gateway/conn.rs:590`): op 7 → resume; op 9 `true` → resume, `false` → identify after 1–5 s. https://docs.discord.food/gateway/using-gateway#resuming
+- `on_ready` (`src/discord/gateway/conn.rs:654`):
   - `parse_ready`, then the session (the resume URL only if `resume_url_allowed`);
   - op 37 for missed guilds (only on a fresh READY after a drop);
   - `apply(Ready)`, then `live.set_buffered(full-watch channels)`.
-- `identify_payload` (`src/discord/gateway/conn.rs:158`):
+- `identify_payload` (`src/discord/gateway/conn.rs:167`):
   - capabilities 253;
   - `properties` = `fp.identify_properties()`;
   - presence `{status:"unknown", since:0, activities:[], afk:true}`;
@@ -95,11 +96,12 @@ The one persistent gateway connection, like Discord web's. It connects, identifi
 
 - **Never close with 1000 or 1001:** that ends the session and shows the user offline. Every close tritone sends is 4000. Dropping the process just drops TCP.
 - **The dead token is never retried.** 4004 goes through `reject_token`, and `status` only wakes the gateway for a different token (`try_login_with`). A REST 401 (`HttpDiscord`) can come first; the gateway keeps its socket until a new login arrives, then closes 4000 and identifies with the new token.
-- **A fatal close code halts with `DiscordError::GatewayClosed { code }`, and only a restart recovers from it.** On any halt the loop also applies `Disconnected`, so the model never looks ready with a dead socket. Even if something lifts the halt (`SendQueue::resume` lifts any non-login halt), `connection()` stays `Reconnecting`, not `Ready`.
+- **A fatal close code halts with `DiscordError::GatewayClosed { code }`, and only a restart recovers from it; so does `SessionRefused`. `SendQueue::resume` refuses both.** On any halt the loop also applies `Disconnected`, so the model never looks ready with a dead socket. Even if something lifts the halt (`SendQueue::resume` lifts any non-login halt), `connection()` stays `Reconnecting`, not `Ready`.
 - **wreq's 30 s client timeout doesn't reach the upgraded socket:** it wraps the request and its body only. `socket_outlives_the_http_client_timeout` holds a socket for 3 paused minutes.
 - **The resume URL comes from READY,** but the token only goes to `*.discord.gg` over `wss` (or the host tritone was pointed at). Otherwise it resumes through the main gateway.
 - **Op 37's `channels: {id: [[0,99]]}` asks for the first 100 member-list rows of those channels.** That is the request the web client sends when you open a channel, so it's kept on purpose. The spec's "never subscribe to member lists" means no member-list *scraping*. To keep it that way, op 37 goes only to guilds where the READY diff shows missed messages (never at startup), and to at most 5 watched text-like channels per guild.
-- **The miss check runs only on a fresh READY after a drop.** `cutoff` is the first drop since the last READY/RESUMED; RESUMED clears it, because a resume replays what was missed.
+- **The miss check runs only on a fresh READY after a drop.** The gap is taken at the first drop since the last READY/RESUMED; RESUMED clears it, because a resume replays what was missed.
+- **`cutoff` is when the dead socket last delivered a payload (wall clock), not when the drop was noticed.** A zombie is only seen at the next missed heartbeat ack, and a sleeping machine stretches that to the whole sleep (tokio's clock doesn't advance during it). Stamping detection time would count the downtime itself as missed messages, and send op 37 after every sleep. Test: `downtime_before_a_zombie_is_noticed_is_not_a_miss`.
 - **Broadcast consumers can lag.** `LiveState::subscribe` is a tokio broadcast channel (capacity 1024). Anyone who subscribes must handle `RecvError::Lagged(n)` (count the skipped events and resync from `LiveState`), or it will drop events or stop on the error.
 - **`set_buffered` is set on every READY only.** A watch-level change made later has to call `live.set_buffered` itself.
 - **No message text, token or cookie is logged.** Logs carry close codes, opcodes, counts and the `resume`/`resumable` flags.

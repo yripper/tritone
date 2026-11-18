@@ -242,6 +242,16 @@ async fn resume_refuses_while_needs_login() {
 }
 
 #[tokio::test]
+async fn resume_refuses_after_the_gateway_closed_the_session() {
+    let r = rig(&[20_000]);
+    let closed = DiscordError::GatewayClosed { code: 4011 };
+    r.live.halt(closed.clone());
+    let e = r.q.resume().unwrap_err();
+    assert!(e.to_string().contains("restart tritone"), "{e}");
+    assert_eq!(r.live.connection(), ConnState::Halted(closed), "only a restart lifts it");
+}
+
+#[tokio::test]
 async fn resume_after_captcha_clears_the_halt_and_continues() {
     let r = rig(&[20_000]);
     r.api.fail_on("send", DiscordError::Captcha);

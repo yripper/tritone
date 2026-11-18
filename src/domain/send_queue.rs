@@ -576,14 +576,19 @@ impl SendQueue {
     }
 
     /// The user's explicit "continue" after a halt. Refuses while the login
-    /// is dead (`tritone login` fixes that). For a CAPTCHA, a locked account
+    /// is dead (`tritone login` fixes that) or after the gateway closed the
+    /// session (only a restart fixes that). For a CAPTCHA, a locked account
     /// or an edge block it lifts tritone's halt and the REST client's own,
     /// then resumes the queue once the connection is ready; after a block,
     /// writes still wait its Retry-After, counted from when it hit. The job
     /// that hit the error stays failed.
     pub fn resume(&self) -> Result<QueueStatus> {
         let live_halt = match self.live.connection() {
-            ConnState::Halted(DiscordError::NeedsLogin) => return Err(Error::Discord(DiscordError::NeedsLogin)),
+            // Neither can be continued: a dead login needs `tritone login`, a
+            // gateway that closed the session needs a restart.
+            ConnState::Halted(e @ (DiscordError::NeedsLogin | DiscordError::GatewayClosed { .. })) => {
+                return Err(Error::Discord(e));
+            }
             ConnState::Halted(e) => Some(e),
             _ => None,
         };

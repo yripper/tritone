@@ -41,7 +41,7 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
   - 400 with `captcha_key` → `Captcha`; 401 with code 60003 (the action needs MFA) → `Locked`, keeping the token; any other 401 → `NeedsLogin`;
   - 403/429 whose body isn't JSON (Cloudflare HTML or text) → `Blocked`; JSON 403 → `Forbidden`; 404 → `NotFound`;
   - 429 with `retry_after` (body, else the `Retry-After` header) → the client cools down that long; a GET is retried once when the wait is ≤ 10 s (`MAX_GET_RETRY_WAIT`), otherwise `RateLimited`. Writes are never retried. 429 without any wait → `Blocked` (never retry blind).
-  - `Blocked.retry_after_s` is the `Retry-After` header, at least 60.
+  - `Blocked.retry_after_s` is the `Retry-After` header, at least 60. A `Blocked` answer also cools the pacer down for that long, so clearing the halt early (`clear_halt`) still sends nothing before the block has passed: calls get `RateLimited`.
   - https://docs.discord.food/topics/rate-limits, https://docs.discord.food/topics/captcha-handling
 - Halts (`set_halt`, `src/discord/http.rs:145`): any error with `halts()` is stored (first wins) and reported: `NeedsLogin` → `live.reject_token(token)`, others → `live.halt(e)`. Logs carry the kind only.
 - Endpoints (https://docs.discord.food/resources/message, /resources/channel, /topics/read-state, /resources/user-settings):

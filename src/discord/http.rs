@@ -213,6 +213,12 @@ impl HttpDiscord {
                     return Err(DiscordError::RateLimited { retry_after_s: ceil_secs(wait) });
                 }
                 Outcome::Err(e) => {
+                    if let DiscordError::Blocked { retry_after_s } = e {
+                        // The block's window outlives the halt: if the user clears
+                        // the halt early, calls still get `RateLimited` without a
+                        // request until it has passed.
+                        turn.cool_down(Duration::from_secs(retry_after_s));
+                    }
                     if e.halts() {
                         self.set_halt(&e);
                     }

@@ -574,3 +574,26 @@ async fn clear_halt_never_lifts_a_dead_token() {
     assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::NeedsLogin));
     assert_eq!(received(&env).await.len(), 1, "a rejected token stays halted until a new login rebuilds the client");
 }
+
+#[tokio::test]
+async fn clearing_a_block_keeps_calls_off_the_network_until_it_passes() {
+    let env = env().await;
+    Mock::given(method("GET"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("content-type", "text/html")
+                .insert_header("retry-after", "600")
+                .set_body_string("<html>blocked</html>"),
+        )
+        .mount(&env.server)
+        .await;
+    assert_eq!(env.api.history(Id(101), None, None, 5).await, Err(DiscordError::Blocked { retry_after_s: 600 }));
+    // The user says "continue" well inside the block window.
+    env.live.clear_halt();
+    env.api.clear_halt();
+    match env.api.history(Id(101), None, None, 5).await {
+        Err(DiscordError::RateLimited { retry_after_s }) => assert!(retry_after_s > 590, "{retry_after_s}"),
+        other => panic!("expected RateLimited, got {other:?}"),
+    }
+    assert_eq!(received(&env).await.len(), 1, "nothing went out during the block");
+}

@@ -1,6 +1,6 @@
 # discord
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 Everything that talks to Discord. Nothing outside `src/discord/` makes network calls; the rest of tritone uses the `DiscordApi` trait and `LiveState`.
@@ -29,7 +29,7 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
 - `GuildSettings` (`src/discord/types.rs:209`): `guild_id: None` holds the DM settings; `channel_mutes` holds every channel override, including `No` (explicit unmute).
 - `Message` (`src/discord/types.rs:218`): attachments are placeholders (`"image: a.png"`), embeds are titles, reactions are `(":name:" or emoji, count)`.
 - `DiscordError` (`src/discord/types.rs:259`): `NeedsLogin`, `Captcha`, `Locked`, `Blocked`, `RateLimited`, `Indexing`, `Forbidden`, `NotFound`, `Api { status, code }`, `Http`. Display says what the user must do. `halts()` (`src/discord/types.rs:292`) is true for `NeedsLogin | Captcha | Locked | Blocked`: nothing retries those. `kind()` (`src/discord/types.rs:300`) is log-safe.
-- `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`.
+- `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`, and `clear_halt()` (`src/discord/api.rs:35`), a sync default no-op: a client with its own sticky halt overrides it; only `SendQueue::resume` calls it, on the user's explicit OK.
 - `GatewayEvent` (`src/discord/gateway/events.rs:6`): `Ready`, `Resumed`, `MessageCreate`, `MessageAck`, `ChannelUpsert`, `ChannelDelete`, `GuildUpsert(guild, channels)` (GUILD_CREATE), `GuildUpdate(guild)` (GUILD_UPDATE: keeps channels and my roles), `MyRolesUpdate { guild, roles }` (GUILD_MEMBER_UPDATE for self), `GuildDelete`, `SettingsUpdate`, `Disconnected`, `Halted`. On close 4004 the gateway calls `LiveState::reject_token` rather than sending `Halted(NeedsLogin)`, so the dead token is remembered.
 
 ## HttpDiscord (`src/discord/http.rs`)

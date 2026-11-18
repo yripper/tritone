@@ -37,9 +37,16 @@ async fn save_and_forget_a_login() {
 fn daemon_state() -> AppState {
     let store = Arc::new(Store::open_in_memory().unwrap());
     let timer = Arc::new(FakeTimer::at(1_000_000));
-    let queue = Arc::new(SendQueue::new(store.clone(), timer.clone(), Arc::new(SeqGaps::new(&[0]))));
     let live = Arc::new(LiveState::new(BufferPolicy { per_channel: 10, max_age_ms: 3_600_000 }));
-    AppState::new(store, Arc::new(MemSecrets::default()), live, queue, Arc::new(Config::default()), timer)
+    let config = Arc::new(Config::default());
+    let queue = Arc::new(SendQueue::new(
+        store.clone(),
+        live.clone(),
+        config.clone(),
+        timer.clone(),
+        Arc::new(SeqGaps::new(&[0])),
+    ));
+    AppState::new(store, Arc::new(MemSecrets::default()), live, queue, config, timer)
 }
 
 #[tokio::test]

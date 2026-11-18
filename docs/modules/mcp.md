@@ -1,6 +1,6 @@
 # mcp
 
-Last verified: 2026-11-18
+Last verified: 2026-11-19
 
 ## Purpose
 The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (default 7781). Stateless, behind a Host check and a bearer token. Tools are split into one router per group.
@@ -15,7 +15,14 @@ The MCP server Claude talks to: Streamable HTTP on `127.0.0.1:<port>/mcp` (defau
 
 ## Tools
 - `status` (`src/mcp/tools/status.rs:26`): `connection` (`connecting`, `ready`, `reconnecting`, `needs_login`, `halted`), `user` (username only), `guilds` (a count), `note`. While halted on `NeedsLogin`, a keyring token that `AppState::accept_login` takes (`LiveState::try_login_with` accepts it: not the rejected one, nor one already tried) drops the old REST client and wakes the gateway through `login_notify`, and `status` reports `connecting`; the dead token never does, so polling `status` can't loop identifies (`src/mcp/tools/status.rs:45`).
-- The other groups are empty so far.
+- Write tools (`src/mcp/tools/write.rs`). None writes inside the call: each validates, then enqueues on the `SendQueue` with the current REST client and returns `{ job_id, position, eta_secs, note }`.
+  - `send_message{channel, text, reply_to?, kind?}` (`src/mcp/tools/write.rs:107`), `react{channel, message, emoji}` (`:121`), `create_thread{channel, from_message?, name, text?}` (`:133`, text or announcement channels only), `create_forum_post{forum, title, text}` (`:151`, forum or media channels only).
+  - `channel`/`forum` is an id or a `discord.com/channels/...` link of a channel `LiveState` knows (`target`, `src/mcp/tools/write.rs:65`). Outgoing text goes through `outgoing_text` (`src/mcp/tools/write.rs:82`), the one place `@username` → `<@id>` conversion plugs in.
+  - `send_status{job_id?}` (`src/mcp/tools/write.rs:169`) and `resume_queue` (`src/mcp/tools/write.rs:180`) don't go through `run`, so they work while halted. `resume_queue` first attaches the REST client `AppState` holds now, then calls `SendQueue::resume`: refuses on `NeedsLogin`, otherwise lifts `live`'s and the client's halt and resumes the queue (after a block, writes still wait its Retry-After).
+- Activity tools (`src/mcp/tools/activity.rs`):
+  - `my_activity{days?}` (`src/mcp/tools/activity.rs:50`): the last `days` (default 30, at least 1) through `domain::activity::my_activity`. Reads only the store and `LiveState`, so it works while halted.
+  - `backfill_activity` (`src/mcp/tools/activity.rs:62`): refuses until the connection is `Ready` (before READY no guilds are known). Unless every guild is done, starts `domain::activity::backfill` in a background task, at most one at a time (`BACKFILL_RUNNING`, `src/mcp/tools/activity.rs:22`); returns `{ running, guilds_done, guilds_total, recorded, messages_seen, last_error?, note }`. A run that stops stores its error in `kv` `backfill_last_error`; the next call continues it.
+- The read, triage and engage groups are empty so far.
 
 ## Other routes
 - `POST /login-notify` (`src/mcp/http.rs:68`), behind the same guard: `tritone login` calls it after saving a token. Same rule as `status`: only while halted on `NeedsLogin` (any other halt, or a live connection → 409 asking for a restart, so a login can't lift a CAPTCHA or block halt or wake a healthy gateway); then `AppState::accept_login` with the keyring token, 200 when it acts; the rejected or already-tried token, or none → 409 with a "run `tritone login`" text; keyring error → 500. So a new login takes effect even if nobody polls `status`.
@@ -41,4 +48,4 @@ rmcp 3.8 (`server`, `macros`, `transport-streamable-http-server`; Cargo.lock pin
 - Halt contract (`src/mcp/state.rs:7`): a dead token calls `live.reject_token(token)`, any other halting error `live.halt(e)`; `ctx()` refuses while halted, across gateway reconnects.
 
 ## Testing
-`cargo test mcp`: `/login-notify` (wakes on a new token only while halted on `NeedsLogin`; not on the rejected one, none, another halt, or a live connection; drops the old client; guarded); the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.
+`cargo test mcp` (write tools: `cargo test tools::write`, calling the tool methods directly on a `TritoneServer` with a `FakeDiscord`): `/login-notify` (wakes on a new token only while halted on `NeedsLogin`; not on the rejected one, none, another halt, or a live connection; drops the old client; guarded); the guard via `tower::ServiceExt::oneshot`; `status` over HTTP through the guard (connecting, ready, needs_login, the login wake-up, and no wake-up for a rejected token); `run` refusing until the client is set and while halted, including across a RESUMED; the instructions and style guide.

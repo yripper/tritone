@@ -434,7 +434,7 @@ async fn dropped_dms_do_not_use_the_fetch_budget() {
 }
 
 #[tokio::test]
-async fn mention_entry_carries_the_ping() {
+async fn mention_entry_shows_its_pings_without_fetching_history() {
     let mut s = snap();
     s.settings.push(guild_settings(MuteUntil::Forever, false));
     let month = 30 * 86_400_000;
@@ -442,15 +442,65 @@ async fn mention_entry_carries_the_ping() {
     let w = world(s);
     let old: Vec<Message> = (1..=30).map(|i| from_u2(at(month - i * 60_000), 101)).collect();
     w.fake.put_history(Id(101), old);
-    w.fake.put_history(Id(101), vec![mention_me(at(1_000), 101)]);
     w.fake.mentions.lock().unwrap().push(mention_me(at(1_000), 101));
     let entries = get_pending(&w.ctx).await.unwrap().pending;
     let e = &entries[0];
     assert_eq!(e.item.reason, Reason::Mention);
-    assert!(e.more_unread);
-    assert!(e.messages.iter().all(|m| m.id != at(1_000).to_string()), "the oldest unread don't reach it");
-    let pings: Vec<String> = e.pings.iter().map(|m| m.id.clone()).collect();
-    assert_eq!(pings, vec![at(1_000).to_string()]);
+    assert!(e.more_unread, "the chatter around it is left to read_history");
+    let ids: Vec<String> = e.messages.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(ids, vec![at(1_000).to_string()], "only the ping, not the 20 oldest unread");
+    let calls = w.fake.calls();
+    assert!(calls.iter().all(|c| !matches!(c, Call::History { .. })), "{calls:?}");
+}
+
+#[tokio::test]
+async fn mentions_past_the_fetch_budget_still_show_their_pings() {
+    let mut s = snap();
+    for n in 1..=16u64 {
+        s.channels.push(dm(400 + n, 2));
+        unread(&mut s, 400 + n, at(n as i64 * 100), Some(at(10_000)));
+    }
+    unread(&mut s, 101, at(5_000), Some(at(9_000)));
+    let w = world(s);
+    for n in 1..=16u64 {
+        w.fake.put_history(Id(400 + n), vec![msg(at(n as i64 * 100), 400 + n, 2, "x")]);
+    }
+    w.fake.mentions.lock().unwrap().push(mention_me(at(5_000), 101));
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    let mention = entries.iter().find(|e| e.item.channel == Id(101)).expect("the mention is pending");
+    assert_eq!(mention.messages.len(), 1, "a ping in hand costs no fetch");
+    let dms_with_messages = entries.iter().filter(|e| e.item.reason == Reason::Dm && !e.messages.is_empty()).count();
+    assert_eq!(dms_with_messages, MAX_FETCH, "the budget goes to entries that need a fetch");
+}
+
+#[tokio::test]
+async fn direct_pings_win_over_newer_group_pings() {
+    let mut s = snap();
+    unread(&mut s, 101, at(1_000), Some(at(100_000)));
+    let w = world(s);
+    let direct = mention_me(at(90_000), 101);
+    let everyone: Vec<Message> =
+        (1..=6).map(|i| Message { mention_everyone: true, ..from_u2(at(i * 1_000), 101) }).collect();
+    w.fake.mentions.lock().unwrap().extend(everyone.into_iter().chain([direct]));
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    let ids: Vec<String> = entries[0].messages.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(ids.len(), MAX_PINGS);
+    assert_eq!(ids[0], at(90_000).to_string(), "the older direct mention is kept, oldest first");
+    assert_eq!(ids[1..], [at(4_000), at(3_000), at(2_000), at(1_000)].map(|i| i.to_string()));
+}
+
+#[tokio::test]
+async fn mention_without_a_ping_in_hand_falls_back_to_history() {
+    let mut s = snap();
+    // Discord counts a mention the inbox and buffer don't have.
+    unread(&mut s, 101, at(1_000), Some(at(9_000)));
+    s.read_states.get_mut(&Id(101)).unwrap().mention_count = 1;
+    let w = world(s);
+    w.fake.put_history(Id(101), vec![from_u2(at(1_000), 101)]);
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    assert_eq!(entries[0].item.reason, Reason::Mention);
+    assert_eq!(entries[0].messages.len(), 1);
+    assert!(w.fake.calls().iter().any(|c| matches!(c, Call::History { channel: Id(101), .. })));
 }
 
 const DAY: i64 = 86_400_000;

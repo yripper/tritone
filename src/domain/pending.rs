@@ -36,10 +36,6 @@ pub struct PendingEntry {
     pub item: PendingItem,
     pub messages: Vec<RenderedMessage>,
     pub more_unread: bool,
-    /// For mentions and replies: the messages that ping the user, when
-    /// `messages` (the oldest unread) doesn't reach them.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub pings: Vec<RenderedMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
@@ -54,7 +50,7 @@ const MAX_FETCH: usize = 15;
 /// History calls one `get_pending` may make in all, counting channels that
 /// turn out read (no read state, the user's message last).
 const MAX_CALLS: usize = 30;
-/// Pinging messages shown per entry.
+/// Pinging messages shown per mention or reply entry.
 const MAX_PINGS: usize = 5;
 /// Mentions inbox pages of 100 read by `get_pending`, at most.
 const MAX_INBOX_PAGES: usize = 5;
@@ -342,9 +338,9 @@ async fn inbox(ctx: &Ctx, now: i64) -> Result<(Vec<Message>, bool)> {
     Ok((all, true))
 }
 
-/// `pending` plus the first unread messages of each entry and, for mentions
-/// and replies, the pinging messages already in hand. Never marks anything
-/// read.
+/// `pending` plus messages for each entry: for mentions and replies, the
+/// pinging messages already in hand; for the rest (and mentions with none in
+/// hand), the first unread messages. Never marks anything read.
 pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
     let now = ctx.timer.now_ms();
     let (mentions, truncated) = inbox(ctx, now).await?;
@@ -359,15 +355,25 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
             let mut msgs: Vec<&Message> = mentions.iter().filter(|m| m.channel_id == item.channel).collect();
             msgs.sort_by_key(|m| m.id);
             let messages = msgs.into_iter().map(|m| render_message(m, &ctx.live)).collect();
-            out.push(PendingEntry { item, messages, more_unread: true, pings: vec![], error: None });
+            out.push(PendingEntry { item, messages, more_unread: true, error: None });
             continue;
+        }
+        // A mention or reply shows the messages that ping the user, from the
+        // inbox and the buffer, at no REST cost: the oldest unread would be
+        // channel chatter. The rest is for read_history.
+        if matches!(item.reason, Reason::Mention | Reason::Reply) {
+            let shown = pings_in_hand(&ctx.live, &item, &mentions, me);
+            if !shown.is_empty() {
+                out.push(PendingEntry { item, messages: shown, more_unread: true, error: None });
+                continue;
+            }
         }
         let acked = ctx.live.read_state(item.channel).last_acked;
         // A channel with no read state must be fetched to know whether it's
         // unread at all, so it's fetched even past the budget of kept entries.
         let fetch = calls < MAX_CALLS && (kept < MAX_FETCH || acked.is_none());
         if !fetch {
-            out.push(PendingEntry { item, messages: vec![], more_unread: true, pings: vec![], error: None });
+            out.push(PendingEntry { item, messages: vec![], more_unread: true, error: None });
             continue;
         }
         calls += 1;
@@ -375,13 +381,7 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
             Ok(p) => p,
             Err(e) if e.halts() => return Err(e.into()),
             Err(e) => {
-                out.push(PendingEntry {
-                    item,
-                    messages: vec![],
-                    more_unread: true,
-                    pings: vec![],
-                    error: Some(e.to_string()),
-                });
+                out.push(PendingEntry { item, messages: vec![], more_unread: true, error: Some(e.to_string()) });
                 continue;
             }
         };
@@ -399,34 +399,24 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
             Some(_) => page.iter().skip(page.len().saturating_sub(FIRST_UNREAD)).collect(),
             None => page.iter().take(FIRST_UNREAD).collect(),
         };
-        let pings = match item.reason {
-            Reason::Mention | Reason::Reply => pings_outside(&ctx.live, &item, &mentions, &keep, me),
-            _ => vec![],
-        };
         let messages = keep.into_iter().rev().map(|m| render_message(m, &ctx.live)).collect();
-        out.push(PendingEntry { item, messages, more_unread, pings, error: None });
+        out.push(PendingEntry { item, messages, more_unread, error: None });
     }
     Ok(PendingReport { pending: out, truncated })
 }
 
-/// The newest pinging messages in hand that `shown` doesn't include, oldest first.
-fn pings_outside(
-    live: &LiveState,
-    item: &PendingItem,
-    mentions: &[Message],
-    shown: &[&Message],
-    me: Id,
-) -> Vec<RenderedMessage> {
+/// Up to `MAX_PINGS` of the unread messages in hand that ping the user,
+/// oldest first: direct mentions and replies before role and @everyone pings,
+/// newest first within each.
+fn pings_in_hand(live: &LiveState, item: &PendingItem, mentions: &[Message], me: Id) -> Vec<RenderedMessage> {
     let Some(c) = live.channel(item.channel) else { return vec![] };
     let (_, in_hand) = in_hand(&c, live, mentions);
-    let mut found: Vec<&Message> = pinging(&c, &in_hand, me, live)
-        .into_iter()
-        .map(|(_, m)| m)
-        .filter(|m| !shown.iter().any(|s| s.id == m.id))
-        .collect();
-    found.sort_by_key(|m| std::cmp::Reverse(m.id));
+    let mut found = pinging(&c, &in_hand, me, live);
+    found.sort_by_key(|(kind, m)| (*kind == Ping::Group, std::cmp::Reverse(m.id)));
     found.truncate(MAX_PINGS);
-    found.into_iter().rev().map(|m| render_message(m, live)).collect()
+    let mut keep: Vec<&Message> = found.into_iter().map(|(_, m)| m).collect();
+    keep.sort_by_key(|m| m.id);
+    keep.into_iter().map(|m| render_message(m, live)).collect()
 }
 
 #[cfg(test)]

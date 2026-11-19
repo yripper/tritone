@@ -6,7 +6,7 @@ A small local daemon that lets Claude (Claude Code, Claude Desktop) triage, read
 
 ## What it does
 
-- `get_pending`: what's waiting on you. That's unread DMs and group DMs, mentions and replies, threads you're in, and channels you put on "full" watch, each with its first unread messages. Discord's own read state is the source of truth, so it works right after a restart.
+- `get_pending`: what's waiting on you. That's unread DMs and group DMs, mentions and replies, threads you're in, and channels you put on "full" watch, each with its first unread messages (for mentions and replies, the messages that ping you). Discord's own read state is the source of truth, so it works right after a restart.
 - Read any channel, thread, forum post or DM by name (`#general`, with the server when several match), `@user`, a `discord.com/channels/…` link or its id, and search with Discord's own search. When a name matches several channels, tritone lists them as `server › #channel` and never picks one on its own.
 - **Reading marks read**, because Discord has no read receipts: `read_history` and `read_thread` mark the channel read up to the newest message they return. Pass `peek: true` to read without marking.
 - Send messages, react, start threads and forum posts as you, only after you approve the exact text. Writes are **queued**: one at a time, 20–60 s apart (random), at most 30 per hour, and messages show typing for a few seconds first. `send_status` shows how each one went.
@@ -25,7 +25,7 @@ If your login dies (logged out elsewhere, password changed), tritone stops calli
 | `status` | Whether tritone is connected to Discord, as whom, and in how many servers |
 | `list_servers` | Servers you're in, with unread channel counts and mutes |
 | `list_channels` | Channels, DMs, group DMs and joined threads, with watch level, unread state and mutes |
-| `get_pending` | What's waiting on you, each with its first unread messages. Marks nothing read |
+| `get_pending` | What's waiting on you, each with its first unread messages, or for mentions the pings themselves. Marks nothing read |
 | `read_history` | Recent messages of a channel or DM. Marks it read unless `peek: true` |
 | `read_thread` | Messages of a thread or forum post. Marks it read unless `peek: true` |
 | `search_messages` | Discord's own search, in one server or one channel/DM |

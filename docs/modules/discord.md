@@ -1,6 +1,6 @@
 # discord
 
-Last verified: 2026-11-19
+Last verified: 2026-11-20
 
 ## Purpose
 Everything that talks to Discord. Nothing outside `src/discord/` makes network calls; the rest of tritone uses the `DiscordApi` trait and `LiveState`.
@@ -24,11 +24,11 @@ Everything that talks to Discord. Nothing outside `src/discord/` makes network c
   - `from_timestamp_ms(ms, counter)` (`src/discord/types.rs:26`): builds an id for a time, e.g. a nonce; `counter` fills the low bits.
 - `ChannelKind::from_u8` (`src/discord/types.rs:95`): 0 Text, 1 Dm, 2 Voice, 3 GroupDm, 4 Category, 5 Announcement, 10/11/12 threads, 15 Forum, 16 Media, else `Other(n)`. `is_thread()`, `is_private()` (DM or group DM).
 - `UserRef::label` (`src/discord/types.rs:133`): display name, else username.
-- `Guild` (`src/discord/types.rs:156`): `roles` includes @everyone, whose id is the guild id; `my_roles` are the user's roles.
-- `MuteUntil::active(now_ms)` (`src/discord/types.rs:201`).
-- `GuildSettings` (`src/discord/types.rs:213`): `guild_id: None` holds the DM settings; `channel_mutes` holds every channel override, including `No` (explicit unmute).
-- `Message` (`src/discord/types.rs:222`): attachments are placeholders (`"image: a.png"`), embeds are titles, reactions are `(":name:" or emoji, count)`.
-- `DiscordError` (`src/discord/types.rs:263`): `NeedsLogin`, `Captcha`, `Locked`, `Blocked`, `RateLimited`, `Indexing`, `Forbidden`, `NotFound`, `Api { status, code }`, `Http`, `GatewayClosed { code }` (a fatal gateway close: restart tritone), `SessionRefused` (3 identifies in a row without READY: restart tritone). Display says what the user must do. `halts()` (`src/discord/types.rs:304`) is true for `NeedsLogin | Captcha | Locked | Blocked | GatewayClosed | SessionRefused`: nothing retries those. `kind()` (`src/discord/types.rs:317`) is log-safe.
+- `Guild` (`src/discord/types.rs:158`): `roles` includes @everyone, whose id is the guild id; `my_roles` are the user's roles.
+- `MuteUntil::active(now_ms)` (`src/discord/types.rs:203`).
+- `GuildSettings` (`src/discord/types.rs:215`): `guild_id: None` holds the DM settings; `channel_mutes` holds every channel override, including `No` (explicit unmute).
+- `Message` (`src/discord/types.rs:224`): attachments are placeholders (`"image: a.png"`, `"sticker: wave"`, `"poll: question"`, `"embed"`), `forwarded` is a forward's original text (never a ping), embeds are titles, reactions are `(":name:" or emoji, count)`.
+- `DiscordError` (`src/discord/types.rs:269`): `NeedsLogin`, `Captcha`, `Locked`, `Blocked`, `RateLimited`, `Indexing`, `Forbidden`, `NotFound`, `Api { status, code }`, `Http`, `GatewayClosed { code }` (a fatal gateway close: restart tritone), `SessionRefused` (3 identifies in a row without READY: restart tritone). Display says what the user must do. `halts()` (`src/discord/types.rs:310`) is true for `NeedsLogin | Captcha | Locked | Blocked | GatewayClosed | SessionRefused`: nothing retries those. `kind()` (`src/discord/types.rs:323`) is log-safe.
 - `DiscordApi` (`src/discord/api.rs:13`): `history` (newest first, at most one of before/after), `around`, `recent_mentions`, `search`, `ack`, `ack_bulk` (≤100 items; callers chunk), `typing`, `send`, `react`, `create_thread`, `create_forum_post`, `leave_guild`, `set_mute`, `user`, and `clear_halt()` (`src/discord/api.rs:35`), a sync default no-op: a client with its own sticky halt overrides it; only `SendQueue::resume` calls it, on the user's explicit OK.
 - `GatewayEvent` (`src/discord/gateway/events.rs:15`): `Ready`, `Resumed`, `MessageCreate`, `MessageAck`, `ChannelUpsert`, `ChannelDelete`, `GuildUpsert(guild, channels)` (GUILD_CREATE), `GuildUpdate(guild)` (GUILD_UPDATE: keeps channels and my roles), `MyRolesUpdate { guild, roles }` (GUILD_MEMBER_UPDATE for self), `RoleUpsert { guild, role }` / `RoleDelete { guild, role }` (GUILD_ROLE_*), `ThreadMembership { thread, joined }` (THREAD_MEMBER_UPDATE, or THREAD_MEMBERS_UPDATE adding or removing the user), `GuildDelete`, `SettingsUpdate`, `Disconnected`, `Halted`. On close 4004 the gateway calls `LiveState::reject_token` rather than sending `Halted(NeedsLogin)`, so the dead token is remembered.
 
@@ -76,9 +76,9 @@ Remote-auth v2, https://docs.discord.food/remote-authentication/desktop.
 
 ## Parsing (`src/discord/parse.rs`)
 `pub(crate)`, shared by the REST client and the gateway; REST and gateway objects have the same shape. https://docs.discord.food/resources/message, https://docs.discord.food/resources/channel
-- `parse_message(&Value) -> Option<Message>` (`src/discord/parse.rs:72`): `None` without id, channel or author. `timestamp` (RFC 3339) → ms, else the id's time; `edited` = `edited_timestamp` not null; `reply_to` from `message_reference.message_id`, `reply_to_author` from `referenced_message.author.id` (null when deleted); attachments → `"image: a.png"` (content type `image/*`, else a known image extension) or `"file: b.pdf"`; embeds → titles, untitled ones dropped; reactions → `(":name:", n)` for custom emoji, `("👍", n)` for unicode.
+- `parse_message(&Value) -> Option<Message>` (`src/discord/parse.rs:93`): `None` without id, channel or author. `timestamp` (RFC 3339) → ms, else the id's time; `edited` = `edited_timestamp` not null; `reply_to` from `message_reference.message_id`, `reply_to_author` from `referenced_message.author.id` (null when deleted); attachments → `"image: a.png"` (content type `image/*`, else a known image extension) or `"file: b.pdf"`; embeds → titles, untitled ones dropped (`embed_titles`, `src/discord/parse.rs:70`); stickers → `"sticker: name"`, a poll → `"poll: question"`, and `"embed"` when an untitled embed is all a message has (`placeholders`, `src/discord/parse.rs:77`); a forward's snapshot (`message_snapshots[0].message`; https://docs.discord.com/developers/resources/message#message-snapshot-object) gives `forwarded` (its text) and adds its placeholders and embed titles; reactions → `(":name:", n)` for custom emoji, `("👍", n)` for unicode.
 - `parse_user` (`src/discord/parse.rs:39`): `global_name` is the display name (empty → `None`).
-- `parse_channel` (`src/discord/parse.rs:121`): `None` without id or type; overwrite `type` 0/1 or `"role"`/`"member"`, `allow`/`deny` as decimal strings. `recipients` must be full user objects (READY's `recipient_ids` are the gateway's job). `joined` is true when the object carries a thread `member` (the user's own). `Channel::joined` (`src/discord/types.rs:167`) matters for threads only: user accounts see every active thread, and only joined ones count as the user's.
+- `parse_channel` (`src/discord/parse.rs:145`): `None` without id or type; overwrite `type` 0/1 or `"role"`/`"member"`, `allow`/`deny` as decimal strings. `recipients` must be full user objects (READY's `recipient_ids` are the gateway's job). `joined` is true when the object carries a thread `member` (the user's own). `Channel::joined` (`src/discord/types.rs:184`) matters for threads only: user accounts see every active thread, and only joined ones count as the user's.
 
 ## Fingerprint (`src/discord/fingerprint.rs:46`)
 Identity: Discord web in Chrome. Fields: `user_agent`, `browser_version`, `os`, `os_version`, `locale` (a Discord locale), `timezone` (IANA, `UTC` fallback), `build_number`, `installation_id`, plus `sec_ch_ua` and `sec_ch_ua_platform` (same Chrome profile as the UA).

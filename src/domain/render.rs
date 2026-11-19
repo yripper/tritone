@@ -40,14 +40,24 @@ const MAX_TOKEN: usize = 64;
 
 pub fn render_message(m: &Message, live: &LiveState) -> RenderedMessage {
     let guild = m.guild_id.or_else(|| live.channel(m.channel_id).and_then(|c| c.guild_id));
-    let mut text = map_outside_code(&m.content, |s| replace_tokens(s, live, guild));
+    let render = |t: &str| map_outside_code(t, |s| replace_tokens(s, live, guild));
+    let forwarded = m.forwarded.as_deref().map(|f| format!("[forwarded]\n{}", render(f)));
     let attachments = m.attachments.iter().map(|a| format!("[{a}]"));
     let embeds = m.embeds.iter().map(|e| format!("[embed: {e}]"));
-    for p in attachments.chain(embeds) {
+    let mut text = render(&m.content);
+    for p in forwarded.into_iter().chain(attachments).chain(embeds) {
         if !text.is_empty() {
             text.push('\n');
         }
         text.push_str(&p);
+    }
+    // Calls, pins, joins and the like carry no text; say so rather than
+    // showing an empty message.
+    if text.is_empty() {
+        text = match m.kind {
+            0 | 19 => "[no text]".to_string(),
+            k => format!("[no text: message type {k}]"),
+        };
     }
     RenderedMessage {
         id: m.id.to_string(),

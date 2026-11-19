@@ -235,7 +235,11 @@ pub struct Message {
     pub mentions: Vec<Id>,
     pub mention_roles: Vec<Id>,
     pub mention_everyone: bool,
-    /// Placeholders such as "image: a.png" and "file: b.pdf".
+    /// The text of a forwarded message (its snapshot), apart from this
+    /// message's own text. Never counts as a ping.
+    pub forwarded: Option<String>,
+    /// Placeholders such as "image: a.png", "file: b.pdf", "sticker: wave",
+    /// "poll: question" and "embed" (an untitled embed alone).
     pub attachments: Vec<String>,
     /// Embed titles only.
     pub embeds: Vec<String>,

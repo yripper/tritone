@@ -139,3 +139,34 @@ fn parse_channel_reads_threads_dms_and_overwrites() {
     assert_eq!(dm.recipients.len(), 1);
     assert!(parse_channel(&json!({"id": "301"})).is_none());
 }
+
+#[test]
+fn parse_message_forward_sticker_and_poll() {
+    let mut v = base();
+    v["content"] = json!("");
+    v["message_snapshots"] = json!([{"message": {
+        "type": 0,
+        "content": "the original text",
+        "attachments": [{"id": "8", "filename": "d.png", "content_type": "image/png"}],
+        "embeds": [{"type": "rich", "title": "Docs"}],
+        "sticker_items": [{"id": "9", "name": "wave", "format_type": 1}]
+    }}]);
+    v["sticker_items"] = json!([{"id": "10", "name": "party", "format_type": 1}]);
+    v["poll"] = json!({"question": {"text": "Which day?"}, "answers": []});
+    let m = parse_message(&v).expect("parses");
+    assert_eq!(m.content, "");
+    assert_eq!(m.forwarded.as_deref(), Some("the original text"));
+    assert_eq!(m.attachments, vec!["sticker: party", "poll: Which day?", "image: d.png", "sticker: wave"]);
+    assert_eq!(m.embeds, vec!["Docs"]);
+}
+
+#[test]
+fn parse_message_untitled_embed_alone_gets_a_placeholder() {
+    let mut v = base();
+    v["content"] = json!("");
+    v["embeds"] = json!([{"type": "image", "url": "https://example.com/x.png"}]);
+    assert_eq!(parse_message(&v).expect("parses").attachments, vec!["embed"]);
+    // With text, an untitled embed is a link preview of that text: dropped.
+    v["content"] = json!("https://example.com/x.png");
+    assert!(parse_message(&v).expect("parses").attachments.is_empty());
+}

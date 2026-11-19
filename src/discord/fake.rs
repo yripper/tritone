@@ -115,6 +115,7 @@ impl FakeDiscord {
             mentions: vec![],
             mention_roles: vec![],
             mention_everyone: false,
+            forwarded: None,
             attachments: vec![],
             embeds: vec![],
             reactions: vec![],

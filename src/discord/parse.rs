@@ -66,12 +66,35 @@ fn reaction(r: &Value) -> Option<(String, u32)> {
     Some((label, count))
 }
 
+/// Titles of a message's embeds; untitled ones (link previews, images) are dropped.
+fn embed_titles(v: &Value) -> Vec<String> {
+    array(v, "embeds").iter().filter_map(|e| str_field(e, "title")).filter(|t| !t.is_empty()).collect()
+}
+
+/// Placeholders for what a message (or a forward's snapshot) carries besides
+/// text: attachments, stickers, a poll, and "embed" when an untitled embed is
+/// all there is (with text it's a preview of that text's link).
+fn placeholders(v: &Value) -> Vec<String> {
+    let mut out: Vec<String> = array(v, "attachments").iter().filter_map(attachment_placeholder).collect();
+    out.extend(array(v, "sticker_items").iter().filter_map(|s| str_field(s, "name")).map(|n| format!("sticker: {n}")));
+    if let Some(q) = v.get("poll").and_then(|p| p.get("question")).and_then(|q| str_field(q, "text")) {
+        out.push(format!("poll: {q}"));
+    }
+    let no_text = str_field(v, "content").is_none_or(|c| c.is_empty());
+    if no_text && out.is_empty() && embed_titles(v).is_empty() && !array(v, "embeds").is_empty() {
+        out.push("embed".to_string());
+    }
+    out
+}
+
 /// A message object as REST and the gateway send it. `None` when the id,
 /// channel or author is missing. A missing or odd timestamp falls back to the
 /// id's; embeds without a title are dropped (link previews, images).
 pub(crate) fn parse_message(v: &Value) -> Option<Message> {
     let msg_id = field_id(v, "id")?;
     let reference = v.get("message_reference");
+    // A forward carries a copy of the original (one snapshot, no author).
+    let snapshot = array(v, "message_snapshots").first().and_then(|s| s.get("message"));
     Some(Message {
         id: msg_id,
         channel_id: field_id(v, "channel_id")?,
@@ -89,8 +112,9 @@ pub(crate) fn parse_message(v: &Value) -> Option<Message> {
         mentions: array(v, "mentions").iter().filter_map(|u| field_id(u, "id")).collect(),
         mention_roles: ids(v, "mention_roles"),
         mention_everyone: v.get("mention_everyone").and_then(Value::as_bool).unwrap_or(false),
-        attachments: array(v, "attachments").iter().filter_map(attachment_placeholder).collect(),
-        embeds: array(v, "embeds").iter().filter_map(|e| str_field(e, "title")).filter(|t| !t.is_empty()).collect(),
+        forwarded: snapshot.and_then(|m| str_field(m, "content")).filter(|t| !t.is_empty()),
+        attachments: placeholders(v).into_iter().chain(snapshot.map(placeholders).unwrap_or_default()).collect(),
+        embeds: embed_titles(v).into_iter().chain(snapshot.map(embed_titles).unwrap_or_default()).collect(),
         reactions: array(v, "reactions").iter().filter_map(reaction).collect(),
         kind: v.get("type").and_then(Value::as_u64).unwrap_or(0) as u8,
     })

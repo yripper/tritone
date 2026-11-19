@@ -165,3 +165,15 @@ fn reply_author_converts() {
     l.apply(GatewayEvent::MessageCreate(Box::new(question.clone())), NOW);
     assert_eq!(to_discord_mentions("@Sam try Y", &l, Id(101), Some(question.id)), "<@4> try Y");
 }
+
+#[test]
+fn render_forward_and_empty_messages() {
+    let l = world();
+    let fwd = Message { forwarded: Some("hi <@3>".into()), ..in_guild(id_at(NOW), "") };
+    assert_eq!(render_message(&fwd, &l).text, "[forwarded]\nhi @Three");
+    let with_note = Message { forwarded: Some("hi".into()), ..in_guild(id_at(NOW), "look") };
+    assert_eq!(render_message(&with_note, &l).text, "look\n[forwarded]\nhi");
+    assert_eq!(render_message(&in_guild(id_at(NOW), ""), &l).text, "[no text]");
+    let call = Message { kind: 3, ..in_guild(id_at(NOW), "") };
+    assert_eq!(render_message(&call, &l).text, "[no text: message type 3]");
+}

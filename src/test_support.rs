@@ -71,6 +71,7 @@ pub fn msg(id: Id, channel: u64, author: u64, content: &str) -> Message {
         mentions: vec![],
         mention_roles: vec![],
         mention_everyone: false,
+        forwarded: None,
         attachments: vec![],
         embeds: vec![],
         reactions: vec![],

@@ -400,16 +400,31 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
             Some(_) => page.iter().skip(page.len().saturating_sub(FIRST_UNREAD)).collect(),
             None => page.iter().take(FIRST_UNREAD).collect(),
         };
+        // A mention whose ping the inbox doesn't have (older than its 7
+        // days): show the pings on this page, never the chatter around them.
+        if matches!(item.reason, Reason::Mention | Reason::Reply) {
+            let page: Vec<Message> = keep.into_iter().cloned().collect();
+            let messages = match ctx.live.channel(item.channel) {
+                Some(c) => {
+                    let muted = watch_of(&c, &ctx.live, &watch, now).0 == WatchLevel::Muted;
+                    select_pings(&c, &page, me, &ctx.live, muted)
+                        .into_iter()
+                        .map(|m| render_message(m, &ctx.live))
+                        .collect()
+                }
+                None => vec![],
+            };
+            out.push(PendingEntry { item, messages, more_unread: true, error: None });
+            continue;
+        }
         let messages = keep.into_iter().rev().map(|m| render_message(m, &ctx.live)).collect();
         out.push(PendingEntry { item, messages, more_unread, error: None });
     }
     Ok(PendingReport { pending: out, truncated })
 }
 
-/// Up to `MAX_PINGS` of the unread messages in hand that ping the user,
-/// oldest first: direct mentions and replies before role and @everyone pings,
-/// newest first within each. A muted channel shows no group pings, as in
-/// `pending`.
+/// The pinging messages in hand for a mention or reply entry, rendered (see
+/// `select_pings`).
 fn pings_in_hand(
     live: &LiveState,
     watch: &WatchMap,
@@ -421,13 +436,20 @@ fn pings_in_hand(
     let Some(c) = live.channel(item.channel) else { return vec![] };
     let (_, in_hand) = in_hand(&c, live, mentions);
     let muted = watch_of(&c, live, watch, now_ms).0 == WatchLevel::Muted;
-    let mut found = pinging(&c, &in_hand, me, live);
+    select_pings(&c, &in_hand, me, live, muted).into_iter().map(|m| render_message(m, live)).collect()
+}
+
+/// Up to `MAX_PINGS` of `msgs` that ping the user, oldest first: direct
+/// mentions and replies before role and @everyone pings, newest first within
+/// each. A muted channel shows no group pings, as in `pending`.
+fn select_pings<'a>(c: &Channel, msgs: &'a [Message], me: Id, live: &LiveState, muted: bool) -> Vec<&'a Message> {
+    let mut found = pinging(c, msgs, me, live);
     found.retain(|(kind, _)| !(muted && *kind == Ping::Group));
     found.sort_by_key(|(kind, m)| (*kind == Ping::Group, std::cmp::Reverse(m.id)));
     found.truncate(MAX_PINGS);
     let mut keep: Vec<&Message> = found.into_iter().map(|(_, m)| m).collect();
     keep.sort_by_key(|m| m.id);
-    keep.into_iter().map(|m| render_message(m, live)).collect()
+    keep
 }
 
 #[cfg(test)]

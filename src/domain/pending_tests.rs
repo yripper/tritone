@@ -496,11 +496,27 @@ async fn mention_without_a_ping_in_hand_falls_back_to_history() {
     unread(&mut s, 101, at(1_000), Some(at(9_000)));
     s.read_states.get_mut(&Id(101)).unwrap().mention_count = 1;
     let w = world(s);
-    w.fake.put_history(Id(101), vec![from_u2(at(1_000), 101)]);
+    // An @everyone older than the inbox's 7 days, among chatter.
+    let ping = Message { mention_everyone: true, ..from_u2(at(4_000), 101) };
+    w.fake.put_history(Id(101), vec![from_u2(at(3_000), 101), ping, from_u2(at(5_000), 101)]);
     let entries = get_pending(&w.ctx).await.unwrap().pending;
     assert_eq!(entries[0].item.reason, Reason::Mention);
-    assert_eq!(entries[0].messages.len(), 1);
+    let ids: Vec<String> = entries[0].messages.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(ids, vec![at(4_000).to_string()], "only the ping, not the chatter around it");
+    assert!(entries[0].more_unread);
     assert!(w.fake.calls().iter().any(|c| matches!(c, Call::History { channel: Id(101), .. })));
+}
+
+#[tokio::test]
+async fn fetched_mention_without_a_ping_shows_no_chatter() {
+    let mut s = snap();
+    unread(&mut s, 101, at(1_000), Some(at(9_000)));
+    s.read_states.get_mut(&Id(101)).unwrap().mention_count = 1;
+    let w = world(s);
+    w.fake.put_history(Id(101), (1..=5).map(|i| from_u2(at(i * 1_000), 101)).collect());
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    assert!(entries[0].messages.is_empty(), "the ping is further on: read_history");
+    assert!(entries[0].more_unread);
 }
 
 const DAY: i64 = 86_400_000;

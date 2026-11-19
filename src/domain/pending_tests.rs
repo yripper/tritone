@@ -572,3 +572,29 @@ async fn failed_later_inbox_page_is_truncated() {
     assert!(r.truncated, "the second page failed: the 7 days weren't read whole");
     assert_eq!(inbox_pages(&api.calls()).len(), 2);
 }
+
+#[tokio::test]
+async fn muted_channel_shows_only_its_direct_pings() {
+    let mut s = snap();
+    s.settings.push(guild_settings(MuteUntil::Forever, false));
+    unread(&mut s, 101, at(1_000), Some(at(100_000)));
+    let w = world(s);
+    let everyone: Vec<Message> =
+        (1..=3).map(|i| Message { mention_everyone: true, ..from_u2(at(i * 1_000), 101) }).collect();
+    w.fake.mentions.lock().unwrap().extend(everyone.into_iter().chain([mention_me(at(50_000), 101)]));
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    let ids: Vec<String> = entries[0].messages.iter().map(|m| m.id.clone()).collect();
+    assert_eq!(ids, vec![at(50_000).to_string()], "a Discord mute hides group pings");
+}
+
+#[tokio::test]
+async fn mention_without_read_state_is_dropped_when_my_message_is_last() {
+    let mut s = snap();
+    // No read state at all, an inbox mention, and my answer after it.
+    unread(&mut s, 101, at(1_000), None);
+    let w = world(s);
+    w.fake.mentions.lock().unwrap().push(mention_me(at(3 * DAY), 101));
+    w.fake.put_history(Id(101), vec![msg(at(1_000), 101, ME, "x"), mention_me(at(3 * DAY), 101)]);
+    let entries = get_pending(&w.ctx).await.unwrap().pending;
+    assert!(entries.iter().all(|e| e.item.channel != Id(101)), "answered: read, as in Discord");
+}

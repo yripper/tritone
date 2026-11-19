@@ -358,17 +358,18 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
             out.push(PendingEntry { item, messages, more_unread: true, error: None });
             continue;
         }
+        let acked = ctx.live.read_state(item.channel).last_acked;
         // A mention or reply shows the messages that ping the user, from the
         // inbox and the buffer, at no REST cost: the oldest unread would be
-        // channel chatter. The rest is for read_history.
-        if matches!(item.reason, Reason::Mention | Reason::Reply) {
-            let shown = pings_in_hand(&ctx.live, &item, &mentions, me);
+        // channel chatter. The rest is for read_history. Without a read state
+        // the fetch below must decide whether it's unread at all.
+        if acked.is_some() && matches!(item.reason, Reason::Mention | Reason::Reply) {
+            let shown = pings_in_hand(&ctx.live, &watch, &item, &mentions, me, now);
             if !shown.is_empty() {
                 out.push(PendingEntry { item, messages: shown, more_unread: true, error: None });
                 continue;
             }
         }
-        let acked = ctx.live.read_state(item.channel).last_acked;
         // A channel with no read state must be fetched to know whether it's
         // unread at all, so it's fetched even past the budget of kept entries.
         let fetch = calls < MAX_CALLS && (kept < MAX_FETCH || acked.is_none());
@@ -407,11 +408,21 @@ pub async fn get_pending(ctx: &Ctx) -> Result<PendingReport> {
 
 /// Up to `MAX_PINGS` of the unread messages in hand that ping the user,
 /// oldest first: direct mentions and replies before role and @everyone pings,
-/// newest first within each.
-fn pings_in_hand(live: &LiveState, item: &PendingItem, mentions: &[Message], me: Id) -> Vec<RenderedMessage> {
+/// newest first within each. A muted channel shows no group pings, as in
+/// `pending`.
+fn pings_in_hand(
+    live: &LiveState,
+    watch: &WatchMap,
+    item: &PendingItem,
+    mentions: &[Message],
+    me: Id,
+    now_ms: i64,
+) -> Vec<RenderedMessage> {
     let Some(c) = live.channel(item.channel) else { return vec![] };
     let (_, in_hand) = in_hand(&c, live, mentions);
+    let muted = watch_of(&c, live, watch, now_ms).0 == WatchLevel::Muted;
     let mut found = pinging(&c, &in_hand, me, live);
+    found.retain(|(kind, _)| !(muted && *kind == Ping::Group));
     found.sort_by_key(|(kind, m)| (*kind == Ping::Group, std::cmp::Reverse(m.id)));
     found.truncate(MAX_PINGS);
     let mut keep: Vec<&Message> = found.into_iter().map(|(_, m)| m).collect();
